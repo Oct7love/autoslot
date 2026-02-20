@@ -184,7 +184,17 @@
       autoClickEnabled = !!cfg.autoClick;
       autoRefreshEnabled = !!cfg.autoRefresh;
       autoRefreshInterval = cfg.autoRefreshSec || 30;
-      log("info", "脚本加载完成 | armed=" + armed + " | autoClick=" + autoClickEnabled);
+
+      // 检查紧急抢位标记（API 轮询检测到仓位后触发的刷新）
+      const urgentAge = cfg.urgentGrabTime ? Date.now() - cfg.urgentGrabTime : Infinity;
+      if (cfg.urgentGrab && urgentAge < 30000) {
+        chrome.storage.local.set({ urgentGrab: false });
+        capacityLock = false; // API 已确认有仓位，解锁 DOM 检测
+        log("info", "⚡ [极速] 紧急抢位模式 — API 已确认有仓位，capacityLock 已解锁");
+      } else {
+        log("info", "脚本加载完成 | armed=" + armed + " | autoClick=" + autoClickEnabled);
+      }
+
       applyPreferredWarehouse();
       runDetection();
       startObserver();
@@ -200,7 +210,7 @@
       setTimeout(runDetection, 800);
       setTimeout(runDetection, 2000);
     });
-    // 从邮件点进后切回该标签页时立即再检测一次（“点进去”时自动抢）
+    // 从邮件点进后切回该标签页时立即再检测一次（"点进去"时自动抢）
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && armed) {
         applyPreferredWarehouse();
@@ -1133,7 +1143,7 @@
 
   // 向 injected.js 发送轮询配置
   function sendPollConfig() {
-    const interval = cfg.pollInterval || 2000;
+    const interval = cfg.pollInterval || 500;
     const paused = !armed || Date.now() < cooldownUntil;
     window.postMessage({ type: "SS_SET_POLL", interval, paused }, "*");
   }
@@ -1144,7 +1154,7 @@
     // capacity 请求参数已捕获，启动轮询
     if (e.data.type === "SS_POLL_READY") {
       pollActive = true;
-      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 2000}ms）— 自动刷新已挂起`);
+      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 500}ms）— 页面不刷新，仅API轮询`);
       sendPollConfig();
       return;
     }
@@ -1155,13 +1165,26 @@
 
     if (d.subtype === "capacity") {
       if (!d.isSoldOut && d.slotCount > 0) {
-        capacityLock = false;
-        // 发现仓位 → 暂停轮询，进入抢位流程
-        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 2000, paused: true }, "*");
-        log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot → 零延迟抢位！`);
-        currentState = "AVAILABLE";
-        lastTransition = Date.now();
-        onSlotsAvailable(true);
+        // 暂停轮询
+        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true }, "*");
+        log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot！`);
+
+        // 判断页面是否已渲染出时段卡片（页面自己的 API 调用可能也返回了数据）
+        const timeCards = detectTimeSlotCards();
+        if (timeCards.length > 0) {
+          // 页面已有时段卡片（比如页面自己的 API 也刚返回了），直接抢
+          capacityLock = false;
+          log("info", `⚡ 页面已有 ${timeCards.length} 个时段卡片，直接零延迟抢位！`);
+          currentState = "AVAILABLE";
+          lastTransition = Date.now();
+          onSlotsAvailable(true);
+        } else {
+          // 页面 UI 没更新（轮询是影子请求）→ 保存标记，刷新页面一次
+          log("info", "⚡ 页面 UI 未更新，保存紧急标记并刷新页面…");
+          chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => {
+            location.reload();
+          });
+        }
       } else {
         capacityLock = true;
         if (currentState !== "SOLD_OUT") {
