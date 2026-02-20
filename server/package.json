@@ -1,0 +1,8 @@
+{
+  "name": "slot-sentinel-server",
+  "version": "1.0.0",
+  "description": "Slot Sentinel 远程监控服务器（零依赖）",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

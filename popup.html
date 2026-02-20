@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slot Sentinel</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { width: 360px; font-family: 'Segoe UI', system-ui, sans-serif; background: #0d0d14; color: #e0e0e0; font-size: 13px; }
+    .header { background: linear-gradient(135deg, #1a1a2e, #16213e); padding: 14px 16px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #2a2a40; }
+    .header h1 { font-size: 15px; font-weight: 700; color: #fff; }
+    .version { margin-left: auto; font-size: 11px; color: #555; }
+    .status-bar { padding: 10px 16px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid #1a1a25; background: #111119; }
+    .status-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .status-dot.armed { background: #00e676; }
+    .status-dot.paused { background: #ff9800; }
+    .status-dot.soldout { background: #ef5350; }
+    .status-dot.unknown { background: #555; }
+    .status-text { font-weight: 600; }
+    .status-detail { margin-left: auto; font-size: 10.5px; color: #777; }
+    .arm-section { padding: 10px 16px; border-bottom: 1px solid #1a1a25; }
+    .arm-btn { width: 100%; padding: 11px; border: none; border-radius: 8px; font-size: 14px; font-weight: 700; cursor: pointer; }
+    .arm-btn.armed { background: linear-gradient(135deg, #1b5e20, #2e7d32); color: #fff; }
+    .arm-btn.paused { background: linear-gradient(135deg, #e65100, #ef6c00); color: #fff; }
+    .section { padding: 10px 16px; border-bottom: 1px solid #141420; }
+    .section-title { font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px; color: #555; font-weight: 700; margin-bottom: 8px; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
+    .toggle-label { font-size: 12.5px; color: #ccc; }
+    .switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .switch .slider { position: absolute; inset: 0; background: #333; border-radius: 20px; cursor: pointer; transition: 0.2s; }
+    .switch .slider::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; bottom: 2px; background: #888; border-radius: 50%; transition: 0.2s; }
+    .switch input:checked + .slider { background: #2e7d32; }
+    .switch input:checked + .slider::before { transform: translateX(16px); background: #fff; }
+    .switch.danger input:checked + .slider { background: #d32f2f; }
+    .slider-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; }
+    .slider-row label { font-size: 12.5px; color: #ccc; flex-shrink: 0; }
+    .slider-row input[type="range"] { flex: 1; accent-color: #00e676; }
+    .slider-row .val { font-size: 11px; color: #777; min-width: 38px; text-align: right; }
+    .select-row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
+    .select-row select { background: #1a1a25; color: #ccc; border: 1px solid #333; border-radius: 4px; padding: 3px 8px; font-size: 12px; }
+    .actions { display: flex; gap: 6px; padding: 10px 16px; border-bottom: 1px solid #141420; }
+    .action-btn { flex: 1; padding: 7px 0; border: 1px solid #2a2a38; border-radius: 6px; background: #14141f; color: #bbb; font-size: 11px; font-weight: 600; cursor: pointer; }
+    .action-btn:hover { background: #1e1e30; color: #fff; }
+    .action-btn.primary { background: linear-gradient(135deg, #1b5e20, #2e7d32); color: #fff; border-color: #2e7d3255; }
+    .candidate-info { padding: 6px 16px 8px; border-bottom: 1px solid #141420; }
+    .candidate-item { font-size: 10.5px; color: #668; padding: 2px 0; }
+    .log-panel { padding: 8px 16px 12px; max-height: 150px; overflow-y: auto; font-size: 10.5px; color: #666; }
+    .log-entry.info { color: #81c784; }
+    .log-entry.warn { color: #ffb74d; }
+    .log-entry.error { color: #ef5350; }
+    .footer { padding: 8px 16px; font-size: 10px; color: #444; text-align: center; border-top: 1px solid #141420; }
+    .domain-section, .schedule-section, .auto-click-section, .preference-section, .email-section { border-radius: 6px; padding: 10px 12px; margin-bottom: 8px; }
+    .domain-section { background: linear-gradient(135deg, #1a1020, #201030); border: 1px solid #7e57c233; }
+    .domain-section .section-title { color: #b39ddb; }
+    .schedule-section { background: linear-gradient(135deg, #0a0a1e, #0f1030); border: 1px solid #3949ab33; }
+    .schedule-section .section-title { color: #5c6bc0; }
+    .schedule-status { font-size: 11px; padding: 4px 8px; border-radius: 4px; margin: 6px 0 8px; display: none; }
+    .schedule-status.active, .schedule-status.waiting, .schedule-status.inactive { display: block; }
+    .schedule-status.active { background: #1b5e2033; color: #81c784; }
+    .schedule-status.waiting { background: #e6510033; color: #ffb74d; }
+    .schedule-status.inactive { background: #42424233; color: #999; }
+    .schedule-list { max-height: 180px; overflow-y: auto; }
+    .schedule-item { display: flex; align-items: center; gap: 6px; padding: 6px 0; border-bottom: 1px solid #1a1a2e; }
+    .schedule-add-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .schedule-add-row label { font-size: 11px; color: #888; min-width: 30px; }
+    .schedule-add-row input[type="time"] { background: #1a1a2e; border: 1px solid #333; border-radius: 4px; color: #ccc; padding: 3px 6px; font-size: 12px; }
+    .days-picker { display: flex; gap: 3px; flex-wrap: wrap; }
+    .day-btn { width: 28px; height: 22px; border: 1px solid #333; border-radius: 3px; background: #1a1a2e; color: #777; font-size: 10px; cursor: pointer; padding: 0; }
+    .day-btn.selected { background: #3949ab44; color: #7986cb; border-color: #3949ab; }
+    .add-schedule-btn { width: 100%; padding: 6px; border: 1px solid #3949ab55; border-radius: 5px; background: #3949ab22; color: #7986cb; font-size: 11px; cursor: pointer; margin-top: 6px; }
+    .schedule-empty { font-size: 11px; color: #444; text-align: center; padding: 8px 0; }
+    .auto-click-section { background: linear-gradient(135deg, #1a0a00, #2a1000); border: 1px solid #ff6f0033; }
+    .auto-click-section .section-title { color: #ff9800; }
+    .auto-click-warning { font-size: 10.5px; color: #b0855a; margin-top: 4px; line-height: 1.4; }
+    .preference-section { background: linear-gradient(135deg, #0f1a0f, #0f2010); border: 1px solid #2e7d3233; }
+    .preference-section .section-title { color: #81c784; }
+    .preference-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+    .preference-row label { font-size: 11px; color: #888; min-width: 110px; flex-shrink: 0; }
+    .preference-row input { flex: 1; background: #0d1a0d; border: 1px solid #2a3f2a; border-radius: 4px; color: #ccc; padding: 5px 8px; font-size: 12px; }
+    .preference-help { font-size: 10px; color: #4a6a4a; margin-top: 6px; line-height: 1.4; }
+    .email-section { background: linear-gradient(135deg, #0a1a1a, #0a2020); border: 1px solid #00897b33; }
+    .email-section .section-title { color: #4db6ac; }
+    .email-input-row { display: flex; align-items: center; gap: 6px; padding: 4px 0; }
+    .email-input-row label { font-size: 11px; color: #888; min-width: 48px; }
+    .email-input-row input { flex: 1; background: #0d1f1f; border: 1px solid #2a3f3f; border-radius: 4px; color: #ccc; padding: 5px 8px; font-size: 12px; }
+    .email-status { font-size: 10.5px; padding: 4px 8px; border-radius: 4px; margin: 6px 0 4px; }
+    .email-actions { display: flex; gap: 6px; margin-top: 6px; }
+    .email-actions button { flex: 1; padding: 5px 0; border-radius: 4px; font-size: 11px; font-weight: 600; cursor: pointer; }
+    .btn-save-email { background: #00897b33; border: 1px solid #00897b55; color: #4db6ac; }
+    .btn-test-email { background: transparent; border: 1px solid #333; color: #888; }
+    .domain-item { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid #1a1a2e; }
+    .domain-item .domain-url { flex: 1; font-size: 12px; color: #e0e0e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .domain-add-row { display: flex; gap: 6px; margin-top: 6px; }
+    .domain-add-row input { flex: 1; background: #15102a; border: 1px solid #333; border-radius: 4px; color: #ccc; padding: 5px 8px; font-size: 12px; }
+    .domain-add-btn { padding: 5px 12px; border: 1px solid #7e57c255; border-radius: 4px; background: #7e57c222; color: #b39ddb; font-size: 11px; font-weight: 600; cursor: pointer; }
+    .domain-inject-btn { width: 100%; padding: 5px; margin-top: 6px; border: 1px dashed #333; border-radius: 4px; background: transparent; color: #666; font-size: 10.5px; cursor: pointer; }
+    .domain-help { font-size: 10px; color: #555; margin-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span>⚡</span>
+    <h1>Slot Sentinel</h1>
+    <span class="version">v2.3</span>
+  </div>
+  <div class="status-bar">
+    <span id="statusDot" class="status-dot unknown"></span>
+    <span id="statusText" class="status-text">初始化中…</span>
+    <span id="statusDetail" class="status-detail"></span>
+  </div>
+  <div class="arm-section">
+    <button id="armBtn" class="arm-btn armed">已启用 — 监控中</button>
+  </div>
+
+  <div class="section">
+    <div class="domain-section">
+      <div class="section-title">监控网址</div>
+      <div style="margin-bottom:4px"><span style="font-size:10.5px;color:#666">*.noon.partners / *.noon.com 内置</span></div>
+      <div id="domainList"></div>
+      <div class="domain-add-row">
+        <input type="text" id="domainInput" placeholder="输入域名">
+        <button class="domain-add-btn" id="btnAddDomain">添加</button>
+      </div>
+      <button class="domain-inject-btn" id="btnInjectCurrent">注入当前页面</button>
+      <div class="domain-help">添加后已打开页面会自动注入</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="schedule-section">
+      <div class="section-title">定时调度</div>
+      <div class="toggle-row">
+        <span class="toggle-label">启用定时</span>
+        <label class="switch"><input type="checkbox" id="togSchedule"><span class="slider"></span></label>
+      </div>
+      <div id="scheduleStatus" class="schedule-status inactive">调度未启用</div>
+      <div class="schedule-list" id="scheduleList"><div class="schedule-empty">暂无时间段</div></div>
+      <div class="schedule-add" id="scheduleAddPanel">
+        <div class="schedule-add-row">
+          <label>开始</label><input type="time" id="schStartTime" value="09:00">
+          <label>结束</label><input type="time" id="schEndTime" value="12:00">
+        </div>
+        <div class="schedule-add-row">
+          <label>日期</label>
+          <div class="days-picker" id="daysPicker">
+            <button class="day-btn selected" data-day="1">一</button>
+            <button class="day-btn selected" data-day="2">二</button>
+            <button class="day-btn selected" data-day="3">三</button>
+            <button class="day-btn selected" data-day="4">四</button>
+            <button class="day-btn selected" data-day="5">五</button>
+            <button class="day-btn" data-day="6">六</button>
+            <button class="day-btn" data-day="0">日</button>
+          </div>
+        </div>
+        <button class="add-schedule-btn" id="btnAddSchedule">+ 添加时间段</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="auto-click-section">
+      <div class="section-title">自动化</div>
+      <div class="toggle-row">
+        <span class="toggle-label">自动点击</span>
+        <label class="switch danger"><input type="checkbox" id="togAutoClick"><span class="slider"></span></label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">链式确认</span>
+        <label class="switch danger"><input type="checkbox" id="togAutoClickChain"><span class="slider"></span></label>
+      </div>
+      <div class="slider-row">
+        <label>点击延迟</label>
+        <input type="range" id="autoClickDelay" min="100" max="3000" step="100" value="500">
+        <span class="val" id="autoClickDelayVal">500ms</span>
+      </div>
+      <div class="auto-click-warning">检测到 slot 后自动点击；链式确认会点 Confirm</div>
+    </div>
+    <div class="preference-section">
+      <div class="section-title">抢位偏好</div>
+      <div class="preference-row">
+        <label>首选仓库 (Ship To)</label>
+        <input type="text" id="preferredWarehouse" placeholder="如 RUH01S" maxlength="32">
+      </div>
+      <div class="preference-row">
+        <label>首选日期 (1–31)</label>
+        <input type="number" id="preferredDate" placeholder="不填则自动" min="1" max="31" style="width:70px">
+      </div>
+      <div class="preference-row">
+        <label>首选时段</label>
+        <input type="text" id="preferredTimeText" placeholder="如 9am - 12pm">
+      </div>
+      <div class="preference-help">指定仓库会持续监测；抢到后填预设时间并点 Confirm</div>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">自动刷新</span>
+      <label class="switch"><input type="checkbox" id="togAutoRefresh"><span class="slider"></span></label>
+    </div>
+    <div class="slider-row" id="refreshIntervalRow">
+      <label>刷新间隔</label>
+      <input type="range" id="refreshInterval" min="15" max="120" step="5" value="30">
+      <span class="val" id="refreshIntervalVal">30s</span>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">辅助功能</div>
+    <div class="toggle-row">
+      <span class="toggle-label">自动滚动</span>
+      <label class="switch"><input type="checkbox" id="togScroll" checked><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">自动聚焦</span>
+      <label class="switch"><input type="checkbox" id="togFocus" checked><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">高亮覆盖</span>
+      <label class="switch"><input type="checkbox" id="togHighlight" checked><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">标题闪烁</span>
+      <label class="switch"><input type="checkbox" id="togTitle" checked><span class="slider"></span></label>
+    </div>
+    <div class="toggle-row">
+      <span class="toggle-label">提示音</span>
+      <label class="switch"><input type="checkbox" id="togSound"><span class="slider"></span></label>
+    </div>
+    <div class="select-row">
+      <span class="toggle-label">通知方式</span>
+      <select id="notifMode">
+        <option value="none">无</option>
+        <option value="toast" selected>Toast</option>
+        <option value="desktop">桌面通知</option>
+      </select>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="email-section">
+      <div class="section-title">邮件通知</div>
+      <div class="toggle-row">
+        <span class="toggle-label">启用邮件</span>
+        <label class="switch"><input type="checkbox" id="togEmail"><span class="slider"></span></label>
+      </div>
+      <div class="email-input-row">
+        <label>收件邮箱</label>
+        <input type="email" id="emailAddress" placeholder="your@email.com">
+      </div>
+      <div class="toggle-row" style="padding:3px 0">
+        <span class="toggle-label" style="font-size:11px">发现 slot 时通知</span>
+        <label class="switch" style="width:30px;height:16px"><input type="checkbox" id="togEmailOnAvailable" checked><span class="slider" style="border-radius:16px"></span></label>
+      </div>
+      <div class="toggle-row" style="padding:3px 0">
+        <span class="toggle-label" style="font-size:11px">自动点击后通知</span>
+        <label class="switch" style="width:30px;height:16px"><input type="checkbox" id="togEmailOnClicked" checked><span class="slider" style="border-radius:16px"></span></label>
+      </div>
+      <details style="margin-top:6px">
+        <summary style="font-size:10.5px;color:#4db6ac;cursor:pointer">EmailJS 配置</summary>
+        <div style="margin-top:6px">
+          <div class="email-input-row"><label>Service</label><input type="text" id="emailServiceId" placeholder="service_xxx"></div>
+          <div class="email-input-row"><label>Template</label><input type="text" id="emailTemplateId" placeholder="template_xxx"></div>
+          <div class="email-input-row"><label>Public Key</label><input type="text" id="emailPublicKey" placeholder="Public Key"></div>
+        </div>
+      </details>
+      <div id="emailStatus" class="email-status" style="display:none"></div>
+      <div class="email-actions">
+        <button class="btn-save-email" id="btnSaveEmail">保存配置</button>
+        <button class="btn-test-email" id="btnTestEmail">发送测试</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div style="background:linear-gradient(135deg,#0a0a20,#0f1530);border:1px solid #3949ab33;border-radius:6px;padding:10px 12px;margin-bottom:8px">
+      <div class="section-title" style="color:#7986cb">远程监控</div>
+      <div class="email-input-row">
+        <label style="min-width:48px">服务器</label>
+        <input type="text" id="remoteUrl" placeholder="http://IP:9800" style="background:#0d0d1f;border-color:#2a2a4f">
+      </div>
+      <div class="email-input-row">
+        <label style="min-width:48px">Token</label>
+        <input type="text" id="remoteToken" placeholder="服务器启动时显示的 Token" style="background:#0d0d1f;border-color:#2a2a4f">
+      </div>
+      <div id="remoteStatus" class="email-status" style="display:none"></div>
+      <div class="email-actions">
+        <button id="btnTestRemote" style="flex:1;padding:5px 0;border-radius:4px;font-size:11px;font-weight:600;cursor:pointer;background:#3949ab33;border:1px solid #3949ab55;color:#7986cb">测试连接</button>
+      </div>
+      <div style="font-size:10px;color:#445;margin-top:4px;line-height:1.4">VPS 上运行 <code style="color:#7986cb">node server.js</code>，填入地址和 Token 即可实时推送日志</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">检测参数</div>
+    <div class="slider-row">
+      <label>防抖</label>
+      <input type="range" id="debounceSlider" min="50" max="500" step="25" value="100">
+      <span class="val" id="debounceVal">100ms</span>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="action-btn primary" id="btnForceCheck">立即检测</button>
+    <button class="action-btn" id="btnRefresh">刷新页面</button>
+    <button class="action-btn" id="btnTestHighlight">测试高亮</button>
+  </div>
+
+  <div class="candidate-info" id="candidateInfo" style="display:none">
+    <div class="section-title">检测到的按钮</div>
+    <div id="candidateList"></div>
+  </div>
+
+  <div class="section" style="padding-bottom:0">
+    <div class="section-title" style="display:flex;justify-content:space-between;align-items:center">
+      <span>活动日志</span>
+      <span id="btnClearLogs" style="cursor:pointer;color:#555;font-size:9px">清除</span>
+    </div>
+  </div>
+  <div class="log-panel" id="logPanel">
+    <div class="empty-log">暂无活动记录</div>
+  </div>
+
+  <div class="footer">
+    Alt+S 切换 slot · Alt+P 暂停 · Alt+H 高亮 · Esc 取消自动点击
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

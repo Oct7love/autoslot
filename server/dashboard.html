@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Slot Sentinel 远程监控</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a12; color: #e0e0e0;
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+    }
+    .header {
+      background: linear-gradient(135deg, #1a1a2e, #16213e);
+      padding: 18px 24px;
+      border-bottom: 1px solid #2a2a40;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .header h1 { font-size: 18px; font-weight: 700; }
+    .conn-status { margin-left: auto; display: flex; align-items: center; gap: 6px; font-size: 13px; color: #999; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #ef5350; }
+    .dot.ok { background: #00e676; }
+    .toolbar {
+      padding: 10px 24px; display: flex; align-items: center; gap: 10px;
+      border-bottom: 1px solid #141420; background: #0d0d16;
+    }
+    .toolbar .info { font-size: 12px; color: #666; }
+    .toolbar button {
+      padding: 5px 12px; border: 1px solid #333; border-radius: 6px;
+      background: #14141f; color: #bbb; font-size: 12px; cursor: pointer;
+    }
+    .toolbar button:hover { background: #1e1e30; color: #fff; }
+    .toolbar button.active { background: #1b5e2033; border-color: #2e7d3255; color: #81c784; }
+    .main { display: flex; height: calc(100vh - 104px); }
+    .sidebar {
+      width: 300px; min-width: 260px; border-right: 1px solid #141420;
+      overflow-y: auto; padding: 16px; background: #0b0b14;
+    }
+    .sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #555; margin-bottom: 12px; }
+    .card {
+      background: #111119; border: 1px solid #1a1a2e; border-radius: 8px;
+      padding: 12px; margin-bottom: 10px;
+    }
+    .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .cd { width: 8px; height: 8px; border-radius: 50%; background: #555; }
+    .cd.armed { background: #66bb6a; }
+    .cd.available { background: #00e676; animation: pulse 1s infinite; }
+    .cd.soldout { background: #ef5350; }
+    .cd.paused { background: #ff9800; }
+    .card-title { font-size: 13px; font-weight: 600; }
+    .card-body { font-size: 11px; color: #888; line-height: 1.7; }
+    .card-body b { color: #aaa; font-weight: 500; }
+    .no-ext { text-align: center; color: #444; font-size: 13px; padding: 40px 0; }
+    .log-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+    .log-stream {
+      flex: 1; overflow-y: auto; padding: 8px 16px;
+      font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace; font-size: 12px; line-height: 1.8;
+    }
+    .le { padding: 2px 0; border-bottom: 1px solid #0a0a10; }
+    .le .ts { color: #555; margin-right: 8px; }
+    .le .lv {
+      display: inline-block; width: 36px; text-align: center; border-radius: 3px;
+      font-size: 10px; padding: 1px 4px; margin-right: 6px;
+    }
+    .le.info .lv { background: #1b5e2033; color: #81c784; }
+    .le.warn .lv { background: #e6510033; color: #ffb74d; }
+    .le.error .lv { background: #c6282833; color: #ef5350; }
+    .le.info .msg { color: #b0bec5; }
+    .le.warn .msg { color: #ffcc80; }
+    .le.error .msg { color: #ef9a9a; }
+    .le.hl { background: #1b5e2015; border-left: 3px solid #00e676; padding-left: 8px; }
+    .empty { text-align: center; color: #333; padding: 60px 0; font-size: 14px; }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+    .overlay {
+      position: fixed; inset: 0; background: #0a0a12ee;
+      display: flex; align-items: center; justify-content: center; z-index: 100;
+    }
+    .tbox {
+      background: #111119; border: 1px solid #2a2a40; border-radius: 12px;
+      padding: 32px; width: 360px; text-align: center;
+    }
+    .tbox h2 { font-size: 16px; margin-bottom: 16px; }
+    .tbox input {
+      width: 100%; padding: 10px 14px; background: #0d0d16; border: 1px solid #333;
+      border-radius: 6px; color: #e0e0e0; font-size: 14px; text-align: center; margin-bottom: 12px;
+    }
+    .tbox button {
+      width: 100%; padding: 10px; background: linear-gradient(135deg, #1b5e20, #2e7d32);
+      color: #fff; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer;
+    }
+    .tbox .err { color: #ef5350; font-size: 12px; margin-top: 8px; display: none; }
+    @media(max-width:768px) {
+      .main { flex-direction: column; }
+      .sidebar { width: 100%; min-width: 0; max-height: 200px; border-right: none; border-bottom: 1px solid #141420; }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <span style="font-size:20px">⚡</span>
+    <h1>Slot Sentinel 远程监控</h1>
+    <div class="conn-status">
+      <span class="dot" id="connDot"></span>
+      <span id="connText">连接中…</span>
+      <button id="btnLogout" style="margin-left:8px;padding:3px 10px;border:1px solid #444;border-radius:4px;background:transparent;color:#888;font-size:11px;cursor:pointer">退出</button>
+    </div>
+  </div>
+  <div class="toolbar">
+    <span class="info" id="tbInfo">扩展: 0 个在线</span>
+    <span style="flex:1"></span>
+    <button id="btnSound">声音通知</button>
+    <button id="btnClear">清除日志</button>
+    <button id="btnScroll" class="active">自动滚动</button>
+  </div>
+  <div class="main">
+    <div class="sidebar">
+      <h2>扩展实例</h2>
+      <div id="cards"><div class="no-ext">等待扩展连接…</div></div>
+    </div>
+    <div class="log-area">
+      <div class="log-stream" id="ls"><div class="empty">等待日志…</div></div>
+    </div>
+  </div>
+  <div class="overlay" id="ov">
+    <div class="tbox">
+      <h2>⚡ 输入 Token</h2>
+      <input type="text" id="tkIn" placeholder="粘贴服务器启动时显示的 Token" autofocus>
+      <button id="tkBtn">连接</button>
+      <div class="err" id="tkErr"></div>
+    </div>
+  </div>
+
+<script>
+const $ = (s) => document.getElementById(s);
+
+let token = localStorage.getItem("ss_token") || "";
+let es = null;
+let autoScroll = true;
+let soundOn = false;
+let stateMap = {};
+
+const connDot = $("connDot"), connText = $("connText"), tbInfo = $("tbInfo");
+const cards = $("cards"), ls = $("ls");
+const ov = $("ov"), tkIn = $("tkIn"), tkBtn = $("tkBtn"), tkErr = $("tkErr");
+const btnSound = $("btnSound"), btnClear = $("btnClear"), btnScroll = $("btnScroll");
+
+// ── Token 输入 ──────────────────────────────────────────────────
+
+if (token) { ov.style.display = "none"; connect(token); }
+else tkIn.focus();
+
+tkBtn.addEventListener("click", submitToken);
+tkIn.addEventListener("keydown", (e) => { if (e.key === "Enter") submitToken(); });
+
+$("btnLogout").addEventListener("click", () => {
+  localStorage.removeItem("ss_token");
+  if (es) es.close();
+  token = "";
+  ov.style.display = "flex";
+  connDot.classList.remove("ok");
+  connText.textContent = "已断开";
+  tkIn.value = "";
+  tkIn.focus();
+});
+
+function submitToken() {
+  const t = tkIn.value.trim();
+  if (!t) return;
+  tkBtn.textContent = "连接中…";
+  tkBtn.disabled = true;
+
+  // 先用 fetch 验证 Token 是否正确
+  fetch("/events?token=" + encodeURIComponent(t)).then((r) => {
+    if (r.ok || r.status === 200) {
+      r.body.getReader().cancel();
+      token = t;
+      localStorage.setItem("ss_token", t);
+      ov.style.display = "none";
+      tkBtn.textContent = "连接";
+      tkBtn.disabled = false;
+      connect(t);
+    } else {
+      tkErr.style.display = "block";
+      tkErr.textContent = "Token 错误 (HTTP " + r.status + ")";
+      tkBtn.textContent = "连接";
+      tkBtn.disabled = false;
+    }
+  }).catch((e) => {
+    tkErr.style.display = "block";
+    tkErr.textContent = "连接失败: " + e.message;
+    tkBtn.textContent = "连接";
+    tkBtn.disabled = false;
+  });
+}
+
+// ── SSE 连接 ────────────────────────────────────────────────────
+
+function connect(tk) {
+  if (es) es.close();
+  es = new EventSource("/events?token=" + encodeURIComponent(tk));
+
+  es.addEventListener("open", () => {
+    connDot.classList.add("ok");
+    connText.textContent = "已连接";
+  });
+
+  es.addEventListener("init", (e) => {
+    const d = JSON.parse(e.data);
+    stateMap = d.states || {};
+    renderCards();
+    ls.innerHTML = "";
+    for (const entry of (d.logs || [])) appendLog(entry, false);
+    scrollBottom();
+  });
+
+  es.addEventListener("log", (e) => appendLog(JSON.parse(e.data), true));
+
+  es.addEventListener("state", (e) => {
+    const s = JSON.parse(e.data);
+    stateMap[s.clientId || "default"] = s;
+    renderCards();
+  });
+
+  es.addEventListener("error", () => {
+    connDot.classList.remove("ok");
+    if (es.readyState === 2) {
+      connText.textContent = "连接失败，请检查 Token";
+      ov.style.display = "flex";
+      tkErr.style.display = "block";
+      tkErr.textContent = "Token 错误或服务器拒绝连接";
+      localStorage.removeItem("ss_token");
+    } else {
+      connText.textContent = "断开，重连中…";
+    }
+  });
+}
+
+// ── 日志渲染 ────────────────────────────────────────────────────
+
+const HL_RE = /仓位出现|SLOT|已自动点击|API拦截.*非售罄|已选择仓库|Confirm/i;
+
+function appendLog(entry, notify) {
+  if (ls.querySelector(".empty")) ls.innerHTML = "";
+  const div = document.createElement("div");
+  const lv = entry.level || "info";
+  const hl = HL_RE.test(entry.message || "");
+  div.className = "le " + lv + (hl ? " hl" : "");
+
+  const ts = entry.ts
+    ? new Date(entry.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : "--:--:--";
+  div.innerHTML = `<span class="ts">[${ts}]</span><span class="lv">${lv}</span><span class="msg">${esc(entry.message || "")}</span>`;
+  ls.appendChild(div);
+
+  while (ls.children.length > 600) ls.removeChild(ls.firstChild);
+  if (autoScroll) scrollBottom();
+  if (notify && soundOn && hl) beep();
+}
+
+// ── 状态卡片 ────────────────────────────────────────────────────
+
+function renderCards() {
+  const ids = Object.keys(stateMap);
+  tbInfo.textContent = "扩展: " + ids.length + " 个在线";
+  if (!ids.length) { cards.innerHTML = '<div class="no-ext">等待扩展连接…</div>'; return; }
+
+  cards.innerHTML = "";
+  for (const id of ids) {
+    const s = stateMap[id];
+    const c = document.createElement("div");
+    c.className = "card";
+
+    let dc = "cd", txt = "未知";
+    if (!s.armed) { dc += " paused"; txt = "已暂停"; }
+    else if (s.state === "AVAILABLE") { dc += " available"; txt = "⚡ 有仓位!"; }
+    else if (s.state === "SOLD_OUT") { dc += " soldout"; txt = "已满 / 无位"; }
+    else { dc += " armed"; txt = "监控中…"; }
+
+    const lc = s.lastCheckTime
+      ? new Date(s.lastCheckTime).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+      : "-";
+
+    c.innerHTML = `
+      <div class="card-head"><span class="${dc}"></span><span class="card-title">${txt}</span></div>
+      <div class="card-body">
+        <b>自动点击:</b> ${s.autoClick ? "开" : "关"} | <b>自动刷新:</b> ${s.autoRefresh ? "开" : "关"}<br>
+        <b>最后检测:</b> ${lc}<br>
+        <b>URL:</b> ${esc((s.tabUrl || "").slice(0, 55))}
+      </div>`;
+    cards.appendChild(c);
+  }
+}
+
+// ── 工具栏 ──────────────────────────────────────────────────────
+
+btnSound.addEventListener("click", () => {
+  soundOn = !soundOn;
+  btnSound.classList.toggle("active", soundOn);
+  btnSound.textContent = soundOn ? "声音通知 ✓" : "声音通知";
+});
+
+btnClear.addEventListener("click", () => { ls.innerHTML = '<div class="empty">日志已清除</div>'; });
+
+btnScroll.addEventListener("click", () => {
+  autoScroll = !autoScroll;
+  btnScroll.classList.toggle("active", autoScroll);
+  btnScroll.textContent = autoScroll ? "自动滚动 ✓" : "自动滚动";
+  if (autoScroll) scrollBottom();
+});
+
+// ── 辅助 ────────────────────────────────────────────────────────
+
+function scrollBottom() { ls.scrollTop = ls.scrollHeight; }
+
+function esc(s) { const d = document.createElement("span"); d.textContent = s; return d.innerHTML; }
+
+function beep() {
+  try {
+    const ctx = new AudioContext();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; o.type = "square"; g.gain.value = 0.15;
+    o.start(); g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    o.stop(ctx.currentTime + 0.3);
+  } catch (_) {}
+}
+</script>
+</body>
+</html>

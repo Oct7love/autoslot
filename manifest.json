@@ -1,0 +1,68 @@
+{
+  "manifest_version": 3,
+  "name": "Slot Sentinel",
+  "version": "2.3.0",
+  "description": "Noon FBN 仓库 slot 自动抢位。支持自定义网址、定时调度、自动点击、自动刷新、邮件通知。",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "notifications",
+    "alarms",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.noon.partners/*",
+    "https://*.noon.com/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "service_worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.noon.partners/*",
+        "https://*.noon.com/*"
+      ],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "https://*.noon.partners/*",
+        "https://*.noon.com/*"
+      ],
+      "js": ["content_script.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "cycle-slots": {
+      "suggested_key": { "default": "Alt+S" },
+      "description": "Focus & cycle available slot buttons"
+    },
+    "toggle-monitor": {
+      "suggested_key": { "default": "Alt+P" },
+      "description": "Pause / Resume monitoring"
+    },
+    "toggle-highlight": {
+      "suggested_key": { "default": "Alt+H" },
+      "description": "Toggle highlight overlay"
+    }
+  }
+}
