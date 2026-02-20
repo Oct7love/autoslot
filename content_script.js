@@ -1162,6 +1162,12 @@
       return;
     }
 
+    // 轮询错误上报
+    if (e.data.type === "SS_POLL_ERROR") {
+      log("warn", `[轮询错误] 第${e.data.tick}次: ${e.data.error}`);
+      return;
+    }
+
     if (e.data.type !== "SS_API_RESPONSE") return;
     const d = e.data;
     if (!armed || Date.now() < cooldownUntil) return;

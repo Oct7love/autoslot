@@ -68,8 +68,11 @@
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
+  let pollTickCount = 0;
+
   async function pollCapacity() {
     if (!lastCapacityReq || pollPaused) return;
+    pollTickCount++;
     try {
       const resp = await origFetch(lastCapacityReq.url, {
         method: "POST",
@@ -77,10 +80,17 @@
         body: lastCapacityReq.body,
         credentials: "include",
       });
-      if (!resp.ok) return;
+      if (!resp.ok) {
+        // 上报 HTTP 错误
+        window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP " + resp.status }, "*");
+        return;
+      }
       const data = await resp.json();
       analyzeResponse(lastCapacityReq.url, data);
-    } catch (_) {}
+    } catch (err) {
+      // 上报异常
+      window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: err.message || String(err) }, "*");
+    }
   }
 
   // 捕获 capacity 请求参数
