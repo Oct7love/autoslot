@@ -89,8 +89,8 @@ chrome.storage.local.get(null, (cfg) => {
   togTitle.checked          = cfg.titleFlash !== false;
   togSound.checked          = !!cfg.soundEnabled;
   notifMode.value           = cfg.notifMode || "toast";
-  pollIntervalEl.value      = cfg.pollInterval || 2000;
-  pollIntervalVal.textContent = ((cfg.pollInterval || 2000) / 1000).toFixed(1) + "s";
+  pollIntervalEl.value      = cfg.pollInterval || 500;
+  pollIntervalVal.textContent = formatPollInterval(cfg.pollInterval || 500);
   debounceSlider.value      = cfg.debounceMs || 100;
   debounceVal.textContent   = (cfg.debounceMs || 100) + "ms";
   togSchedule.checked       = !!cfg.scheduleEnabled;
@@ -555,10 +555,14 @@ notifMode.addEventListener("change", () => {
 
 pollIntervalEl.addEventListener("input", () => {
   const val = parseInt(pollIntervalEl.value, 10);
-  pollIntervalVal.textContent = (val / 1000).toFixed(1) + "s";
+  pollIntervalVal.textContent = formatPollInterval(val);
   chrome.storage.local.set({ pollInterval: val });
   sendToContent({ type: "CONFIG_UPDATED", cfg: { pollInterval: val } });
 });
+
+function formatPollInterval(ms) {
+  return ms < 1000 ? ms + "ms" : (ms / 1000).toFixed(1) + "s";
+}
 
 debounceSlider.addEventListener("input", () => {
   const val = parseInt(debounceSlider.value, 10);

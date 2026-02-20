@@ -30,6 +30,7 @@
   let throttleTimer = null;
   const THROTTLE_MS = 150;
   let lastApplyWarehouseTime = 0;
+  let pollActive = false; // API 轮询是否已激活（已捕获 capacity 请求参数）
   const PREFERRED_WAREHOUSE_REAPPLY_MS = 4000;
 
   // ── Noon FBN 专用售罄关键词 ──────────────────────────────────────
@@ -429,6 +430,12 @@
     const jitter = Math.floor(Math.random() * 5000);
     refreshTimer = setTimeout(() => {
       if (autoRefreshEnabled && armed && currentState !== "AVAILABLE") {
+        // API 轮询已激活时跳过页面刷新，轮询本身就是"刷新"
+        if (pollActive) {
+          log("info", "跳过页面刷新（API 轮询已激活，无需 reload）");
+          startAutoRefresh();
+          return;
+        }
         log("info", "自动刷新页面…");
         location.reload();
       } else {
@@ -659,7 +666,7 @@
 
   // ── 当 slot 可用时 ──────────────────────────────────────────────
 
-  function onSlotsAvailable() {
+  function onSlotsAvailable(fromApi) {
     chrome.runtime.sendMessage({
       type: "SLOTS_AVAILABLE",
       count: 1,
@@ -671,7 +678,7 @@
     if (cfg.soundEnabled) playBeep();
 
     if (autoClickEnabled) {
-      performFullGrab();
+      performFullGrab(fromApi);
     }
 
     cooldownUntil = Date.now() + 15000;
@@ -680,12 +687,15 @@
 
   // ── 完整自动抢位流程：选日期 → 等时段出现 → 选时段 → Confirm ──
 
-  function performFullGrab() {
-    const delay = cfg.autoClickDelay || 500;
-    showAutoClickOverlay(delay, null);
-    log("info", `⚡ 开始自动抢位流程（${delay}ms 后执行）`);
+  function performFullGrab(fromApi) {
+    // API 触发 → 零延迟立刻抢；DOM 触发 → 使用配置的延迟
+    const delay = fromApi ? 0 : (cfg.autoClickDelay || 500);
+    if (delay > 0) showAutoClickOverlay(delay, null);
+    log("info", fromApi
+      ? `⚡ [极速] API 检测到仓位，零延迟立刻抢位！`
+      : `⚡ 开始自动抢位流程（${delay}ms 后执行）`);
 
-    setTimeout(() => {
+    const doGrab = () => {
       if (!armed || !autoClickEnabled) {
         log("info", "自动抢位已取消（手动暂停）");
         hideAutoClickOverlay();
@@ -702,8 +712,13 @@
 
       // ── 步骤 2: 等页面响应，然后找时段卡片并点击 ──
       waitForTimeSlots(0);
+    };
 
-    }, delay);
+    if (delay > 0) {
+      setTimeout(doGrab, delay);
+    } else {
+      doGrab();
+    }
   }
 
   const MAX_WAIT_TIMESLOT_ATTEMPTS = 12;
@@ -1128,7 +1143,8 @@
 
     // capacity 请求参数已捕获，启动轮询
     if (e.data.type === "SS_POLL_READY") {
-      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 2000}ms）`);
+      pollActive = true;
+      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 2000}ms）— 自动刷新已挂起`);
       sendPollConfig();
       return;
     }
@@ -1142,10 +1158,10 @@
         capacityLock = false;
         // 发现仓位 → 暂停轮询，进入抢位流程
         window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 2000, paused: true }, "*");
-        log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot → 立即抢位！`);
+        log("info", `⚡ [CAPACITY] 检测到 ${d.slotCount} 个可用 slot → 零延迟抢位！`);
         currentState = "AVAILABLE";
         lastTransition = Date.now();
-        onSlotsAvailable();
+        onSlotsAvailable(true);
       } else {
         capacityLock = true;
         if (currentState !== "SOLD_OUT") {

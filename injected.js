@@ -59,7 +59,7 @@
 
   function startPoll(ms) {
     stopPoll();
-    if (!ms || ms < 300) return;
+    if (!ms || ms < 100) return;
     pollInterval = ms;
     pollTimer = setInterval(pollCapacity, ms);
   }

@@ -38,7 +38,7 @@ const DEFAULTS = {
   preferredTimeText: "",
   remoteUrl: "",
   remoteToken: "",
-  pollInterval: 2000,
+  pollInterval: 500,
 };
 
 chrome.runtime.onInstalled.addListener(() => {
