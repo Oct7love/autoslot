@@ -7,7 +7,13 @@
 (() => {
   "use strict";
 
+  if (window.__SS_CONTENT_INJECTED__) return;
+  window.__SS_CONTENT_INJECTED__ = true;
+
   // ── State ────────────────────────────────────────────────────────
+
+  const _ssNonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    b => b.toString(16).padStart(2, "0")).join("");
 
   let cfg = {};
   let armed = true;
@@ -42,16 +48,11 @@
     /no\s+slots?\s+available/i,
     /sold\s+out/i,
     /\bfully\s+booked\b/i,
-    /\bfull\b/i,
-    /no\s+available/i,
-    /unavailable/i,
     /no\s+capacity/i,
     /slots?\s+are\s+full/i,
     /no\s+delivery\s+slots/i,
     /no\s+shipping\s+slots/i,
     /all\s+slots?\s+(are\s+)?taken/i,
-    /currently\s+unavailable/i,
-    /not\s+available/i,
     /no\s+time\s+slots/i,
   ];
 
@@ -198,6 +199,12 @@
         log("info", "脚本加载完成 | armed=" + armed + " | autoClick=" + autoClickEnabled);
       }
 
+      // #2 #3: 通过 DOM 隐蔽通道传递 nonce，避免 postMessage 暴露
+      const meta = document.createElement("meta");
+      meta.name = "__ss";
+      meta.content = _ssNonce;
+      document.head.appendChild(meta);
+      sendInitWithRetry();
       applyPreferredWarehouse();
       runDetection();
       startObserver();
@@ -220,6 +227,25 @@
         runDetection();
       }
     });
+  }
+
+  // ── SS_INIT 重试机制（#2: 解决 injected.js 加载时序竞争）────────
+
+  let initRetryTimer = null;
+
+  function sendInitWithRetry() {
+    let attempts = 0;
+    const maxAttempts = 25; // 200ms × 25 = 5秒
+    const send = () => {
+      if (attempts >= maxAttempts) {
+        log("warn", "SS_INIT 重试超时（5秒），injected.js 可能未加载");
+        return;
+      }
+      attempts++;
+      window.postMessage({ type: "SS_INIT" }, "*");
+      initRetryTimer = setTimeout(send, 200);
+    };
+    send();
   }
 
   // ── 自主选择仓库（Ship To 下拉）──────────────────────────────────
@@ -684,6 +710,8 @@
     clearTimeout(debounceTimer);
     const ms = cfg.debounceMs || 100;
     debounceTimer = setTimeout(() => {
+      // 仓库下拉操作中 DOM 会瞬间变化，禁止误触发
+      if (warehouseApplyInProgress) return;
       // capacity API 确认无仓位 → 禁止 DOM 检测覆盖
       if (capacityLock) return;
       // 二次确认：确保 "No slots available" 确实消失了
@@ -852,7 +880,7 @@
     }
   }
 
-  const MAX_WAIT_TIMESLOT_ATTEMPTS = 12;
+  const MAX_WAIT_TIMESLOT_ATTEMPTS = 25; // 25 × 800ms = 20秒，给页面更多渲染时间
 
   function waitForTimeSlots(attempt) {
     if (!armed || !autoClickEnabled) {
@@ -879,13 +907,7 @@
       best.el.click();
       log("info", `✅ 步骤2: 已点击时段 "${best.text}"`);
 
-      try {
-        chrome.runtime.sendMessage({
-          type: "AUTO_CLICK_SUCCESS",
-          buttonText: best.text,
-        });
-      } catch (_) {}
-
+      // #1: 移除过早的 AUTO_CLICK_SUCCESS，邮件在 Confirm 成功后才触发
       hideAutoClickOverlay();
 
       // ── 步骤 3: 等 Confirm slot 按钮可点击，然后点击 ──
@@ -895,11 +917,20 @@
         setTimeout(() => chainNextClick(), 1000);
       }
     } else if (attempt < MAX_WAIT_TIMESLOT_ATTEMPTS) {
-      log("info", `等待时段卡片出现… (${attempt + 1}/${MAX_WAIT_TIMESLOT_ATTEMPTS})`);
+      // 每5次尝试滚动页面，刺激懒加载渲染
+      if (attempt > 0 && attempt % 5 === 0) {
+        window.scrollBy(0, 200);
+        setTimeout(() => window.scrollBy(0, -200), 300);
+        log("info", `等待时段卡片… (${attempt + 1}/${MAX_WAIT_TIMESLOT_ATTEMPTS}) — 尝试滚动刺激渲染`);
+      } else {
+        log("info", `等待时段卡片出现… (${attempt + 1}/${MAX_WAIT_TIMESLOT_ATTEMPTS})`);
+      }
       setTimeout(() => waitForTimeSlots(attempt + 1), 800);
     } else {
-      log("warn", "等待超时：时段卡片未出现，请手动操作");
+      // 超时仍未出现 → 尝试刷新页面重来
+      log("warn", "等待 20s 超时：时段卡片未出现，刷新页面重试");
       hideAutoClickOverlay();
+      chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
     }
   }
 
@@ -955,12 +986,24 @@
       log("info", `✅ 已自动点击 Confirm slot!`);
       chainRetryCount = 0;
 
+      // #1: Confirm 成功后才发邮件通知
+      try {
+        chrome.runtime.sendMessage({
+          type: "CONFIRM_CLICK_SUCCESS",
+          buttonText: text,
+        });
+      } catch (_) {}
+
       setTimeout(() => chainNextClick(), 1500);
       return;
     }
 
+    // #1: 链式点击结束兜底通知
     log("info", "链式点击结束 — 没有更多确认按钮");
     chainRetryCount = 0;
+    try {
+      chrome.runtime.sendMessage({ type: "AUTO_CLICK_DONE" });
+    } catch (_) {}
   }
 
   // ── 自动点击倒计时覆盖层 ────────────────────────────────────────
@@ -1266,11 +1309,24 @@
   function sendPollConfig() {
     const interval = cfg.pollInterval || 500;
     const paused = !armed || Date.now() < cooldownUntil;
-    window.postMessage({ type: "SS_SET_POLL", interval, paused }, "*");
+    window.postMessage({ type: "SS_SET_POLL", interval, paused, _ssNonce }, "*");
   }
 
   window.addEventListener("message", (e) => {
     if (e.source !== window || !e.data) return;
+
+    // #2: 收到 injected.js 的 ACK，校验 nonce 摘要后停止重试
+    if (e.data.type === "SS_INIT_ACK") {
+      if (e.data._ssAck !== _ssNonce.slice(0, 8)) return; // 摘要不匹配，忽略伪造 ACK
+      clearTimeout(initRetryTimer);
+      document.querySelector('meta[name="__ss"]')?.remove();
+      log("info", "SS_INIT_ACK 已收到，nonce 已安全传递");
+      return;
+    }
+
+    if (typeof e.data.type === "string" && e.data.type.startsWith("SS_") && e.data.type !== "SS_INIT" && e.data.type !== "SS_SET_POLL") {
+      if (e.data._ssNonce !== _ssNonce) return;
+    }
 
     // capacity 请求参数已捕获，启动轮询
     if (e.data.type === "SS_POLL_READY") {
@@ -1320,7 +1376,7 @@
 
       if (!d.isSoldOut && d.slotCount > 0) {
         // ═══ 发现仓位！═══
-        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true }, "*");
+        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true, _ssNonce }, "*");
         log("info", `⚡⚡⚡ [第${pollCount}次轮询] 检测到 ${d.slotCount} 个可用 slot！！！`);
 
         const timeCards = detectTimeSlotCards();

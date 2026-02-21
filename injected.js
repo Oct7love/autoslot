@@ -8,6 +8,9 @@
 (() => {
   "use strict";
 
+  if (window.__SS_INJECTED__) return;
+  window.__SS_INJECTED__ = true;
+
   const CAPACITY_RE = /\/inbound-scheduler\/.*\/capacity/i;
   const BOOKING_RE = /\/inbound-scheduler\/.*(book|confirm|reserve|schedule|slot)/i;
   const SLOT_URL_RE = /slot|schedule|shipment|booking|availability|inbound|delivery/i;
@@ -15,9 +18,23 @@
 
   const SOLD_OUT_STRINGS = [
     "no slots available", "no slot available", "sold out", "fully booked",
-    "no available", "unavailable", "no capacity", "all slots taken",
-    "no time slots", "no delivery slots", "not available", "slots are full",
+    "no capacity", "all slots taken",
+    "no time slots", "no delivery slots", "slots are full",
   ];
+
+  // ── nonce 通信 ─────────────────────────────────────────────────────
+
+  let _ssNonce = null;
+  const _ssPendingQueue = [];
+  const _SS_QUEUE_LIMIT = 100;
+
+  function ssSend(data) {
+    if (!_ssNonce) {
+      if (_ssPendingQueue.length < _SS_QUEUE_LIMIT) _ssPendingQueue.push(data);
+      return;
+    }
+    window.postMessage({ ...data, _ssNonce }, "*");
+  }
 
   // ── 轮询状态 ─────────────────────────────────────────────────────
 
@@ -35,14 +52,14 @@
 
     if (CAPACITY_RE.test(pathname)) {
       const hasSlots = Array.isArray(data) && data.length > 0;
-      window.postMessage({
+      ssSend({
         type: "SS_API_RESPONSE",
         subtype: "capacity",
         url,
         isSoldOut: !hasSlots,
         slotCount: hasSlots ? data.length : 0,
         slots: hasSlots ? data : [],
-      }, "*");
+      });
       return;
     }
 
@@ -53,7 +70,7 @@
     if (!relevant) return;
 
     const isSoldOut = SOLD_OUT_STRINGS.some((s) => str.includes(s));
-    window.postMessage({ type: "SS_API_RESPONSE", subtype: "generic", url, isSoldOut }, "*");
+    ssSend({ type: "SS_API_RESPONSE", subtype: "generic", url, isSoldOut });
   }
 
   // ── 高频轮询 capacity API（带 429 自动退避）─────────────────────
@@ -89,12 +106,12 @@
         currentInterval = newInterval;
         stopPoll();
         pollTimer = setInterval(pollCapacity, currentInterval);
-        window.postMessage({
+        ssSend({
           type: "SS_POLL_BACKOFF",
           level: backoffLevel,
           interval: currentInterval,
           reason: "429 限流，自动降速",
-        }, "*");
+        });
       }
       consecutive429 = 0;
     }
@@ -110,12 +127,12 @@
         currentInterval = newInterval;
         stopPoll();
         pollTimer = setInterval(pollCapacity, currentInterval);
-        window.postMessage({
+        ssSend({
           type: "SS_POLL_BACKOFF",
           level: backoffLevel,
           interval: currentInterval,
           reason: "限流解除，恢复速度",
-        }, "*");
+        });
       }
       consecutiveOk = 0;
     }
@@ -133,18 +150,18 @@
       });
       if (resp.status === 429) {
         applyBackoff();
-        window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP 429 限流" }, "*");
+        ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP 429 限流" });
         return;
       }
       if (!resp.ok) {
-        window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP " + resp.status }, "*");
+        ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP " + resp.status });
         return;
       }
       checkRecovery();
       const data = await resp.json();
       analyzeResponse(lastCapacityReq.url, data);
     } catch (err) {
-      window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: err.message || String(err) }, "*");
+      ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: err.message || String(err) });
     }
   }
 
@@ -171,7 +188,7 @@
     // 首次捕获到请求参数，如果已配置轮询间隔则启动
     if (pollInterval > 0 && !pollTimer) startPoll(pollInterval);
 
-    window.postMessage({ type: "SS_POLL_READY" }, "*");
+    ssSend({ type: "SS_POLL_READY" });
   }
 
   // ── 自动捕获 booking/confirm API（方案B 自动学习）─────────────────
@@ -194,7 +211,7 @@
       }
     }
 
-    window.postMessage({
+    ssSend({
       type: "SS_BOOKING_API_CAPTURED",
       url,
       method,
@@ -202,7 +219,7 @@
       headers,
       pathname,
       response: responseData,
-    }, "*");
+    });
   }
 
   // ── 监听 content_script 配置 ─────────────────────────────────────
@@ -210,7 +227,23 @@
   window.addEventListener("message", (e) => {
     if (e.source !== window || !e.data) return;
 
+    // #2 #3: 从 DOM 隐蔽通道读取 nonce，回复 ACK（ACK 携带 nonce 摘要防伪造）
+    if (e.data.type === "SS_INIT" && !_ssNonce) {
+      const meta = document.querySelector('meta[name="__ss"]');
+      if (!meta?.content) return;
+      _ssNonce = meta.content;
+      meta.remove();
+      // ACK 携带 nonce 前8字符作为校验摘要，防止页面脚本伪造
+      window.postMessage({ type: "SS_INIT_ACK", _ssAck: _ssNonce.slice(0, 8) }, "*");
+      while (_ssPendingQueue.length) {
+        const msg = _ssPendingQueue.shift();
+        window.postMessage({ ...msg, _ssNonce }, "*");
+      }
+      return;
+    }
+
     if (e.data.type === "SS_SET_POLL") {
+      if (e.data._ssNonce && e.data._ssNonce !== _ssNonce) return;
       const ms = e.data.interval || 0;
       pollPaused = !!e.data.paused;
       if (ms > 0 && ms !== pollInterval) {
@@ -239,10 +272,31 @@
   // ── Patch fetch ──────────────────────────────────────────────────
 
   window.fetch = async function (...args) {
-    const url = args[0] instanceof Request ? args[0].url : String(args[0] || "");
-
-    // 捕获 capacity 请求参数用于轮询
-    try { captureCapacityReq(url, args[1]); } catch (_) {}
+    let url, init;
+    if (args[0] instanceof Request) {
+      // #4: 异步克隆 body + 合并 args[1] 的覆盖参数
+      const req = args[0];
+      const override = args[1] || {};
+      url = req.url;
+      const baseHeaders = Object.fromEntries(req.headers.entries());
+      // args[1] 可能覆盖 method/headers/body
+      const mergedHeaders = override.headers
+        ? { ...baseHeaders, ...(override.headers instanceof Headers ? Object.fromEntries(override.headers.entries()) : override.headers) }
+        : baseHeaders;
+      const mergedMethod = override.method || req.method;
+      req.clone().text().then(bodyText => {
+        captureCapacityReq(url, {
+          method: mergedMethod,
+          headers: mergedHeaders,
+          body: override.body !== undefined ? override.body : bodyText,
+        });
+      }).catch(() => {});
+      init = { method: mergedMethod, headers: mergedHeaders };
+    } else {
+      url = String(args[0] || "");
+      init = args[1];
+      try { captureCapacityReq(url, init); } catch (_) {}
+    }
 
     const result = await origFetch.apply(this, args);
     try {
@@ -251,8 +305,7 @@
         if (ct.includes("json")) {
           result.clone().json().then((data) => {
             analyzeResponse(url, data);
-            // 自动捕获 booking/confirm API
-            try { captureBookingReq(url, args[1], data); } catch (_) {}
+            try { captureBookingReq(url, init, data); } catch (_) {}
           }).catch(() => {});
         }
       }
@@ -264,18 +317,29 @@
 
   const OrigOpen = XMLHttpRequest.prototype.open;
   const OrigSend = XMLHttpRequest.prototype.send;
+  const OrigSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
 
   XMLHttpRequest.prototype.open = function (method, url, ...rest) {
     this._ssUrl = String(url || "");
     this._ssMethod = method;
+    this._ssHeaders = {};
     return OrigOpen.call(this, method, url, ...rest);
+  };
+
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (this._ssHeaders) this._ssHeaders[name] = value;
+    return OrigSetRequestHeader.call(this, name, value);
   };
 
   XMLHttpRequest.prototype.send = function (...args) {
     // 捕获 capacity XHR 请求参数
     try {
       if (this._ssMethod?.toUpperCase() === "POST") {
-        captureCapacityReq(this._ssUrl, { body: args[0] });
+        captureCapacityReq(this._ssUrl, {
+          body: args[0],
+          headers: this._ssHeaders,
+          method: this._ssMethod,
+        });
       }
     } catch (_) {}
 

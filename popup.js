@@ -132,15 +132,19 @@ function addDomain() {
   val = val.replace(/^https?:\/\//, "").replace(/\/.*$/, "");
   if (!val) return;
 
-  chrome.storage.local.get("customDomains", ({ customDomains = [] }) => {
-    if (customDomains.includes(val)) {
-      domainInput.value = "";
-      return;
-    }
-    customDomains.push(val);
-    chrome.runtime.sendMessage({ type: "UPDATE_CUSTOM_DOMAINS", domains: customDomains }, () => {
-      renderDomains(customDomains);
-      domainInput.value = "";
+  const pattern = "https://" + val + "/*";
+  chrome.permissions.request({ origins: [pattern] }, (granted) => {
+    if (!granted) return;
+    chrome.storage.local.get("customDomains", ({ customDomains = [] }) => {
+      if (customDomains.includes(val)) {
+        domainInput.value = "";
+        return;
+      }
+      customDomains.push(val);
+      chrome.runtime.sendMessage({ type: "UPDATE_CUSTOM_DOMAINS", domains: customDomains }, () => {
+        renderDomains(customDomains);
+        domainInput.value = "";
+      });
     });
   });
 }
@@ -148,6 +152,8 @@ function addDomain() {
 function removeDomain(domain) {
   chrome.storage.local.get("customDomains", ({ customDomains = [] }) => {
     customDomains = customDomains.filter((d) => d !== domain);
+    const pattern = "https://" + domain + "/*";
+    chrome.permissions.remove({ origins: [pattern] }).catch(() => {});
     chrome.runtime.sendMessage({ type: "UPDATE_CUSTOM_DOMAINS", domains: customDomains }, () => {
       renderDomains(customDomains);
     });

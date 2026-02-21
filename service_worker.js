@@ -61,20 +61,29 @@ chrome.runtime.onStartup.addListener(() => {
 
 async function registerCustomDomains(domains) {
   try {
-    await chrome.scripting.unregisterContentScripts({ ids: ["ss-custom-domains"] }).catch(() => {});
+    await chrome.scripting.unregisterContentScripts({ ids: ["ss-custom-domains", "ss-custom-domains-main"] }).catch(() => {});
   } catch (_) {}
 
   const patterns = domains.map(domainToPattern).filter(Boolean);
   if (!patterns.length) return;
 
   try {
-    await chrome.scripting.registerContentScripts([{
-      id: "ss-custom-domains",
-      matches: patterns,
-      js: ["content_script.js"],
-      css: ["styles.css"],
-      runAt: "document_idle",
-    }]);
+    await chrome.scripting.registerContentScripts([
+      {
+        id: "ss-custom-domains-main",
+        matches: patterns,
+        js: ["injected.js"],
+        runAt: "document_start",
+        world: "MAIN",
+      },
+      {
+        id: "ss-custom-domains",
+        matches: patterns,
+        js: ["content_script.js"],
+        css: ["styles.css"],
+        runAt: "document_idle",
+      },
+    ]);
   } catch (e) {
     addLog("warn", "自定义域名注册失败: " + e.message);
   }
@@ -94,6 +103,7 @@ async function injectIntoMatchingTabs(domains) {
     try {
       const tabs = await chrome.tabs.query({ url: pattern });
       for (const tab of tabs) {
+        chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["injected.js"], world: "MAIN" }).catch(() => {});
         chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content_script.js"] }).catch(() => {});
         chrome.scripting.insertCSS({ target: { tabId: tab.id }, files: ["styles.css"] }).catch(() => {});
       }
@@ -272,11 +282,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
   }
 
-  if (msg.type === "AUTO_CLICK_SUCCESS") {
+  // #1: 监听 Confirm 点击成功后才发 "clicked" 邮件
+  if (msg.type === "CONFIRM_CLICK_SUCCESS") {
     sendEmail("clicked", {
       buttonText: msg.buttonText || "",
       url: sender?.tab?.url || "",
     });
+  }
+
+  // #1: 链式点击结束 — 仅记录日志，不发邮件（无确认按钮≠预约成功）
+  if (msg.type === "AUTO_CLICK_DONE") {
+    addLog("info", "链式点击流程结束（无更多确认按钮）");
   }
 
   if (msg.type === "SEND_TEST_EMAIL") {
@@ -315,6 +331,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "INJECT_CURRENT_TAB") {
     if (msg.tabId) {
+      chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["injected.js"], world: "MAIN" }).catch(() => {});
       chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["content_script.js"] }).catch(() => {});
       chrome.scripting.insertCSS({ target: { tabId: msg.tabId }, files: ["styles.css"] }).catch(() => {});
     }
@@ -331,8 +348,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // ── 邮件通知 ───────────────────────────────────────────────────────
 
+// #5: 节流改用 chrome.storage.local，SW 重启后状态不丢失
+const EMAIL_THROTTLE_MS = 300000; // 5 分钟
+
 async function sendEmail(event, details) {
   const cfg = await new Promise((r) => chrome.storage.local.get(null, r));
+
+  if (event !== "test") {
+    const throttleTs = cfg.emailThrottleTs || {};
+    const last = throttleTs[event] || 0;
+    if (Date.now() - last < EMAIL_THROTTLE_MS) {
+      addLog("info", `📧 邮件已节流，跳过 ${event}（距上次发送不足 5 分钟）`);
+      return;
+    }
+  }
   if (!cfg.emailEnabled || !cfg.emailAddress) return;
   if (!cfg.emailServiceId || !cfg.emailTemplateId || !cfg.emailPublicKey) {
     addLog("warn", "邮件配置不完整，跳过发送");
@@ -381,6 +410,10 @@ async function sendEmail(event, details) {
     });
 
     if (resp.ok) {
+      // #5: 节流时间戳持久化到 storage
+      const ts = cfg.emailThrottleTs || {};
+      ts[event] = Date.now();
+      chrome.storage.local.set({ emailThrottleTs: ts });
       addLog("info", `📧 邮件已发送 → ${cfg.emailAddress} (${event})`);
     } else {
       const text = await resp.text();
