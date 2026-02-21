@@ -521,20 +521,78 @@
 
   // ── 点击指定日期（日历上的某一天）────────────────────────────────
 
-  function tryClickPreferredDate() {
-    const day = parseInt(cfg.preferredDate, 10);
-    if (!day || day < 1 || day > 31) return;
+  function tryClickAvailableDate() {
+    const preferredDay = parseInt(cfg.preferredDate, 10) || 0;
 
-    const all = document.querySelectorAll("[role='button'], button, a, div[class*='day'], div[class*='date'], [class*='calendar'] *");
+    // 日历区域内可点击的日期元素
+    const selectors = [
+      '[class*="calendar"] [role="button"]',
+      '[class*="calendar"] button',
+      '[class*="calendar"] td',
+      '[class*="calendar"] [class*="cell"]',
+      '[class*="calendar"] [class*="day"]',
+      '[class*="date"] [role="button"]',
+      '[class*="picker"] [role="button"]',
+      '[class*="picker"] td',
+      '.ant-picker-cell',
+      '.ant-picker-cell-inner',
+      '[role="gridcell"]',
+      '[role="button"]',
+      'button',
+    ];
+    const all = document.querySelectorAll(selectors.join(","));
+    const candidates = [];
+
     for (const el of all) {
+      if (el.closest("#ss-toast, #ss-slot-label, #ss-safety-banner, #ss-autoclick-overlay")) continue;
       const t = (el.textContent || "").trim();
-      if (t === String(day) && el.getBoundingClientRect().width > 0) {
-        el.click();
-        log("info", "已选择日期: " + day + " 号");
-        return true;
-      }
+      // 只匹配 1-31 的纯数字日期
+      if (!/^\d{1,2}$/.test(t)) continue;
+      const num = parseInt(t, 10);
+      if (num < 1 || num > 31) continue;
+
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 10 || rect.height < 10) continue;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+
+      // 跳过明显禁用/灰色的日期
+      const isDisabled = el.hasAttribute("disabled") ||
+        el.getAttribute("aria-disabled") === "true" ||
+        /disabled|grey|gray/i.test(el.className) ||
+        parseFloat(style.opacity) < 0.4;
+      if (isDisabled) continue;
+
+      let score = 100;
+      // 首选日期加分
+      if (preferredDay && num === preferredDay) score += 500;
+      // 已高亮/选中的日期（蓝色圆圈）加分
+      const bg = style.backgroundColor || "";
+      const cls = (el.className || "") + " " + (el.parentElement?.className || "");
+      if (/selected|active|current|today|primary|available/i.test(cls)) score += 200;
+      if (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") score += 150;
+      // 在日历容器内加分
+      if (el.closest('[class*="calendar"], [class*="picker"], [class*="date"]')) score += 100;
+
+      candidates.push({ el, num, score, text: t });
     }
-    return false;
+
+    if (!candidates.length) return false;
+
+    // 去重：同一个数字只保留得分最高的
+    const byNum = {};
+    for (const c of candidates) {
+      if (!byNum[c.num] || c.score > byNum[c.num].score) byNum[c.num] = c;
+    }
+    const sorted = Object.values(byNum).sort((a, b) => b.score - a.score);
+    const best = sorted[0];
+
+    best.el.scrollIntoView({ behavior: "instant", block: "center" });
+    best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+    best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+    best.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    log("info", `✅ 步骤1: 已点击日期 ${best.num} 号（得分 ${best.score}）`);
+    return true;
   }
 
   // ── Logging ──────────────────────────────────────────────────────
@@ -861,16 +919,14 @@
         return;
       }
 
-      // ── 步骤 1: 选日期 ──
-      if (cfg.preferredDate) {
-        const clicked = tryClickPreferredDate();
-        log("info", clicked ? `✅ 步骤1: 已点击日期 ${cfg.preferredDate} 号` : `⚠️ 步骤1: 未找到日期 ${cfg.preferredDate}，使用页面默认日期`);
-      } else {
-        log("info", "步骤1: 未设首选日期，使用页面默认日期");
+      // ── 步骤 1: 点击日历上出现的可用日期 ──
+      const dateClicked = tryClickAvailableDate();
+      if (!dateClicked) {
+        log("info", "步骤1: 日历上未找到可点击日期，直接查找时段卡片");
       }
 
-      // ── 步骤 2: 等页面响应，然后找时段卡片并点击 ──
-      waitForTimeSlots(0);
+      // ── 步骤 2: 等页面响应（点日期后需要时间加载时段），然后找时段卡片并点击 ──
+      setTimeout(() => waitForTimeSlots(0), dateClicked ? 1000 : 0);
     };
 
     if (delay > 0) {
@@ -890,31 +946,44 @@
 
     const found = detectTimeSlotCards();
     if (found.length > 0) {
-      // 找到时段卡片了，选最优的
-      let best = found[0];
-      const preferredTime = (cfg.preferredTimeText || "").trim().toLowerCase();
-      if (preferredTime) {
-        const normalized = preferredTime.replace(/\s+/g, " ");
-        const match = found.find((f) => (f.text || "").toLowerCase().replace(/\s+/g, " ").includes(normalized));
-        if (match) {
-          best = match;
-          log("info", `匹配到首选时段: "${best.text}"`);
-        }
+      if (highlightOn) applyHighlights(found);
+
+      // 点击所有时段卡片（两个时间段都要选中变蓝）
+      for (let i = 0; i < found.length; i++) {
+        const card = found[i];
+        card.el.scrollIntoView({ behavior: "instant", block: "center" });
+        // React/Ant Design 需要完整鼠标事件序列才能触发状态变化（白→蓝）
+        card.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+        card.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+        card.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        log("info", `✅ 步骤2: 已点击时段 [${i + 1}/${found.length}] "${card.text}"`);
       }
 
-      if (highlightOn) applyHighlights(found);
-      best.el.scrollIntoView({ behavior: "instant", block: "center" });
-      best.el.click();
-      log("info", `✅ 步骤2: 已点击时段 "${best.text}"`);
+      // 点击后验证：如果卡片没变蓝，尝试点击父元素
+      setTimeout(() => {
+        for (const card of found) {
+          const style = getComputedStyle(card.el);
+          const bg = style.backgroundColor || "";
+          const cls = card.el.className || "";
+          const isSelected = /selected|active|checked|primary/i.test(cls) ||
+            (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent");
+          if (!isSelected && card.el.parentElement) {
+            log("info", `时段 "${card.text}" 未变蓝，尝试点击父元素`);
+            const parent = card.el.parentElement;
+            parent.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+            parent.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
+            parent.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+          }
+        }
+      }, 300);
 
-      // #1: 移除过早的 AUTO_CLICK_SUCCESS，邮件在 Confirm 成功后才触发
       hideAutoClickOverlay();
 
       // ── 步骤 3: 等 Confirm slot 按钮可点击，然后点击 ──
       if (cfg.autoClickChain) {
         log("info", "步骤3: 等待 Confirm slot 按钮…");
         chainRetryCount = 0;
-        setTimeout(() => chainNextClick(), 1000);
+        setTimeout(() => chainNextClick(), 1500);
       }
     } else if (attempt < MAX_WAIT_TIMESLOT_ATTEMPTS) {
       // 每5次尝试滚动页面，刺激懒加载渲染
