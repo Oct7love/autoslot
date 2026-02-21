@@ -55,12 +55,21 @@
     window.postMessage({ type: "SS_API_RESPONSE", subtype: "generic", url, isSoldOut }, "*");
   }
 
-  // ── 高频轮询 capacity API ────────────────────────────────────────
+  // ── 高频轮询 capacity API（带 429 自动退避）─────────────────────
+
+  let pollTickCount = 0;
+  let baseInterval = 0;      // 用户设置的原始间隔
+  let currentInterval = 0;   // 当前实际间隔（可能因退避而变大）
+  let backoffLevel = 0;      // 退避等级：0=正常, 1=2x, 2=4x, 3=8x
+  let consecutive429 = 0;    // 连续 429 计数
+  let consecutiveOk = 0;     // 连续成功计数
 
   function startPoll(ms) {
     stopPoll();
-    if (!ms || ms < 100) return;
-    pollInterval = ms;
+    if (!ms || ms < 500) ms = 500; // 最低 500ms，防止被封
+    baseInterval = ms;
+    currentInterval = ms;
+    backoffLevel = 0;
     pollTimer = setInterval(pollCapacity, ms);
   }
 
@@ -68,7 +77,48 @@
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
   }
 
-  let pollTickCount = 0;
+  // 429 退避：递增间隔；连续成功后恢复
+  function applyBackoff() {
+    consecutive429++;
+    consecutiveOk = 0;
+    if (consecutive429 >= 3 && backoffLevel < 4) {
+      backoffLevel++;
+      const newInterval = Math.min(baseInterval * Math.pow(2, backoffLevel), 30000);
+      if (newInterval !== currentInterval) {
+        currentInterval = newInterval;
+        stopPoll();
+        pollTimer = setInterval(pollCapacity, currentInterval);
+        window.postMessage({
+          type: "SS_POLL_BACKOFF",
+          level: backoffLevel,
+          interval: currentInterval,
+          reason: "429 限流，自动降速",
+        }, "*");
+      }
+      consecutive429 = 0;
+    }
+  }
+
+  function checkRecovery() {
+    consecutiveOk++;
+    consecutive429 = 0;
+    if (backoffLevel > 0 && consecutiveOk >= 10) {
+      backoffLevel = Math.max(0, backoffLevel - 1);
+      const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+      if (newInterval !== currentInterval) {
+        currentInterval = newInterval;
+        stopPoll();
+        pollTimer = setInterval(pollCapacity, currentInterval);
+        window.postMessage({
+          type: "SS_POLL_BACKOFF",
+          level: backoffLevel,
+          interval: currentInterval,
+          reason: "限流解除，恢复速度",
+        }, "*");
+      }
+      consecutiveOk = 0;
+    }
+  }
 
   async function pollCapacity() {
     if (!lastCapacityReq || pollPaused) return;
@@ -80,15 +130,19 @@
         body: lastCapacityReq.body,
         credentials: "include",
       });
+      if (resp.status === 429) {
+        applyBackoff();
+        window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP 429 限流" }, "*");
+        return;
+      }
       if (!resp.ok) {
-        // 上报 HTTP 错误
         window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP " + resp.status }, "*");
         return;
       }
+      checkRecovery();
       const data = await resp.json();
       analyzeResponse(lastCapacityReq.url, data);
     } catch (err) {
-      // 上报异常
       window.postMessage({ type: "SS_POLL_ERROR", tick: pollTickCount, error: err.message || String(err) }, "*");
     }
   }

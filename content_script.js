@@ -1162,9 +1162,17 @@
       return;
     }
 
-    // 轮询错误上报
+    // 轮询退避通知
+    if (e.data.type === "SS_POLL_BACKOFF") {
+      log("warn", `[轮询] ${e.data.reason} → 间隔调整为 ${e.data.interval}ms（退避等级 ${e.data.level}）`);
+      return;
+    }
+
+    // 轮询错误上报（429 不再刷屏，只在退避时通知）
     if (e.data.type === "SS_POLL_ERROR") {
-      log("warn", `[轮询错误] 第${e.data.tick}次: ${e.data.error}`);
+      if (!e.data.error.includes("429")) {
+        log("warn", `[轮询错误] 第${e.data.tick}次: ${e.data.error}`);
+      }
       return;
     }
 
