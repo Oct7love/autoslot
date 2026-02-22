@@ -425,8 +425,11 @@ function updateScheduleStatusUI() {
 
 // ── State updates ──────────────────────────────────────────────────
 
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === "STATE_UPDATE") updateStateUI(msg);
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (msg.type === "STATE_UPDATE") {
+    if (sender?.tab?.id && sender.tab.id !== currentTabId) return;
+    updateStateUI(msg);
+  }
   if (msg.type === "SCHEDULE_STATUS_UPDATE") {
     updateScheduleStatusUI();
   }

@@ -44,6 +44,202 @@
   let pollPaused = false;
   const origFetch = window.fetch;
 
+  // ── Worker 定时器（绕过 Chrome 后台标签页 setInterval 限流）────────
+
+  const POLL_WORKER_CODE = `
+    let timer = null;
+    let interval = 500;
+    let tickCount = 0;
+    let paused = false;
+    let pauseTimer = null;
+    let baseInterval = 500;
+    let backoffLevel = 0;
+    let consecutive429 = 0;
+    let consecutiveOk = 0;
+    let recoveryTimer = null;
+    let recoveryDelay = 45000;
+    let lastRecoveryTime = 0;
+
+    function startTimer() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(() => {
+        if (!paused) {
+          tickCount++;
+          postMessage({ type: "TICK", tick: tickCount });
+        }
+      }, interval);
+    }
+
+    function stopTimer() {
+      if (timer) { clearInterval(timer); timer = null; }
+      if (pauseTimer) { clearTimeout(pauseTimer); pauseTimer = null; }
+      if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+      tickCount = 0;
+      paused = false;
+    }
+
+    function applyBackoff() {
+      consecutive429++;
+      consecutiveOk = 0;
+      // 时间恢复后又立刻 429 → 说明恢复太激进，加大恢复等待
+      if (lastRecoveryTime > 0 && (Date.now() - lastRecoveryTime) < 30000) {
+        recoveryDelay = Math.min(Math.round(recoveryDelay * 1.5), 180000);
+        lastRecoveryTime = 0;
+      }
+      if (consecutive429 >= 3) {
+        if (backoffLevel < 4) {
+          backoffLevel++;
+          const newInterval = Math.min(baseInterval * Math.pow(2, backoffLevel), 30000);
+          if (newInterval !== interval) {
+            interval = newInterval;
+            if (timer) startTimer();
+            postMessage({ type: "BACKOFF_CHANGED", level: backoffLevel, interval: interval, source: "backoff" });
+          }
+        }
+        consecutive429 = 0;
+        scheduleTimeRecovery();
+      }
+    }
+
+    function checkRecovery() {
+      consecutiveOk++;
+      consecutive429 = 0;
+      if (backoffLevel > 0 && consecutiveOk >= 10) {
+        backoffLevel = Math.max(0, backoffLevel - 1);
+        const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+        if (newInterval !== interval) {
+          interval = newInterval;
+          if (timer) startTimer();
+          postMessage({ type: "BACKOFF_CHANGED", level: backoffLevel, interval: interval, source: "recovery" });
+        }
+        // 连续成功恢复 → 重置恢复延迟
+        recoveryDelay = 45000;
+        lastRecoveryTime = 0;
+        consecutiveOk = 0;
+      }
+    }
+
+    function scheduleTimeRecovery() {
+      if (recoveryTimer) clearTimeout(recoveryTimer);
+      if (backoffLevel <= 0) return;
+      recoveryTimer = setTimeout(() => {
+        recoveryTimer = null;
+        if (backoffLevel > 0) {
+          lastRecoveryTime = Date.now();
+          consecutive429 = 0;
+          consecutiveOk = 0;
+          backoffLevel = Math.max(0, backoffLevel - 1);
+          const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+          if (newInterval !== interval) {
+            interval = newInterval;
+            if (timer) startTimer();
+            postMessage({ type: "BACKOFF_CHANGED", level: backoffLevel, interval: interval, source: "time_recovery" });
+          }
+          if (backoffLevel > 0) scheduleTimeRecovery();
+        }
+      }, recoveryDelay);
+    }
+
+    onmessage = function(e) {
+      const msg = e.data;
+      switch (msg.type) {
+        case "START":
+          if (recoveryTimer) { clearTimeout(recoveryTimer); recoveryTimer = null; }
+          recoveryDelay = 45000;
+          lastRecoveryTime = 0;
+          baseInterval = msg.interval || 500;
+          interval = baseInterval;
+          backoffLevel = 0;
+          consecutive429 = 0;
+          consecutiveOk = 0;
+          paused = false;
+          startTimer();
+          break;
+        case "STOP":
+          stopTimer();
+          backoffLevel = 0;
+          consecutive429 = 0;
+          consecutiveOk = 0;
+          break;
+        case "PAUSE":
+          paused = true;
+          break;
+        case "RESUME":
+          paused = false;
+          break;
+        case "PAUSE_FOR":
+          paused = true;
+          if (pauseTimer) clearTimeout(pauseTimer);
+          pauseTimer = setTimeout(() => {
+            paused = false;
+            pauseTimer = null;
+            postMessage({ type: "RESUMED" });
+          }, msg.ms || 16000);
+          break;
+        case "BACKOFF":
+          applyBackoff();
+          break;
+        case "OK":
+          checkRecovery();
+          break;
+        case "SET_INTERVAL":
+          baseInterval = msg.interval || 500;
+          if (backoffLevel === 0) {
+            interval = baseInterval;
+            if (timer) startTimer();
+          }
+          break;
+      }
+    };
+  `;
+
+  let pollWorker = null;
+  let useWorkerFallback = false;
+
+  function createPollWorker() {
+    if (pollWorker) return true;
+    try {
+      const blob = new Blob([POLL_WORKER_CODE], { type: "application/javascript" });
+      const url = URL.createObjectURL(blob);
+      pollWorker = new Worker(url);
+      URL.revokeObjectURL(url);
+      pollWorker.onmessage = handleWorkerMessage;
+      pollWorker.onerror = () => {
+        pollWorker = null;
+        useWorkerFallback = true;
+      };
+      return true;
+    } catch (_) {
+      useWorkerFallback = true;
+      return false;
+    }
+  }
+
+  function handleWorkerMessage(e) {
+    const msg = e.data;
+    switch (msg.type) {
+      case "TICK":
+        pollCapacity();
+        break;
+      case "BACKOFF_CHANGED":
+        const reasons = {
+          backoff: "429 限流，自动降速",
+          recovery: "连续成功，恢复速度",
+          time_recovery: "定时恢复，尝试提速",
+        };
+        ssSend({
+          type: "SS_POLL_BACKOFF",
+          level: msg.level,
+          interval: msg.interval,
+          reason: reasons[msg.source] || (msg.level > 0 ? "429 限流，自动降速" : "限流解除，恢复速度"),
+        });
+        break;
+      case "RESUMED":
+        ssSend({ type: "SS_POLL_RESUMED" });
+        break;
+    }
+  }
+
   // ── 分析响应 ─────────────────────────────────────────────────────
 
   function analyzeResponse(url, data) {
@@ -84,15 +280,31 @@
 
   function startPoll(ms) {
     stopPoll();
-    if (!ms || ms < 500) ms = 500; // 最低 500ms，防止被封
-    baseInterval = ms;
-    currentInterval = ms;
-    backoffLevel = 0;
-    pollTimer = setInterval(pollCapacity, ms);
+    if (!ms || ms < 500) ms = 500;
+    if (!useWorkerFallback && createPollWorker()) {
+      pollWorker.postMessage({ type: "START", interval: ms });
+    } else {
+      baseInterval = ms; currentInterval = ms; backoffLevel = 0;
+      consecutive429 = 0; consecutiveOk = 0;
+      pollTimer = setInterval(pollCapacity, ms);
+    }
   }
 
   function stopPoll() {
+    if (pollWorker) pollWorker.postMessage({ type: "STOP" });
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function pausePollFor(ms) {
+    if (pollWorker && !useWorkerFallback) {
+      pollWorker.postMessage({ type: "PAUSE_FOR", ms });
+    } else {
+      pollPaused = true;
+      setTimeout(() => {
+        pollPaused = false;
+        ssSend({ type: "SS_POLL_RESUMED" });
+      }, ms);
+    }
   }
 
   // 429 退避：递增间隔；连续成功后恢复
@@ -149,7 +361,11 @@
         credentials: "include",
       });
       if (resp.status === 429) {
-        applyBackoff();
+        if (pollWorker && !useWorkerFallback) {
+          pollWorker.postMessage({ type: "BACKOFF" });
+        } else {
+          applyBackoff();
+        }
         ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP 429 限流" });
         return;
       }
@@ -157,7 +373,11 @@
         ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: "HTTP " + resp.status });
         return;
       }
-      checkRecovery();
+      if (pollWorker && !useWorkerFallback) {
+        pollWorker.postMessage({ type: "OK" });
+      } else {
+        checkRecovery();
+      }
       const data = await resp.json();
       analyzeResponse(lastCapacityReq.url, data);
     } catch (err) {
@@ -185,8 +405,8 @@
 
     lastCapacityReq = { url, body: init?.body || null, headers };
 
-    // 首次捕获到请求参数，如果已配置轮询间隔则启动
-    if (pollInterval > 0 && !pollTimer) startPoll(pollInterval);
+    // 首次捕获到请求参数，如果已配置轮询间隔且尚未启动则启动
+    if (pollInterval > 0 && !pollTimer && !pollWorker) startPoll(pollInterval);
 
     ssSend({ type: "SS_POLL_READY" });
   }
@@ -246,6 +466,15 @@
       if (e.data._ssNonce && e.data._ssNonce !== _ssNonce) return;
       const ms = e.data.interval || 0;
       pollPaused = !!e.data.paused;
+
+      // pauseDuration: 暂停指定时间后自动恢复（Worker 的 setTimeout 不受后台限流）
+      if (e.data.paused && e.data.pauseDuration > 0) {
+        if (ms > 0) pollInterval = ms;
+        if (lastCapacityReq && !pollTimer && !pollWorker) startPoll(pollInterval || ms);
+        pausePollFor(e.data.pauseDuration);
+        return;
+      }
+
       if (ms > 0 && ms !== pollInterval) {
         pollInterval = ms;
         if (lastCapacityReq && !pollPaused) startPoll(ms);
@@ -253,8 +482,72 @@
         stopPoll();
         pollInterval = 0;
       }
-      if (pollPaused) stopPoll();
-      else if (pollInterval > 0 && lastCapacityReq) startPoll(pollInterval);
+      if (pollPaused) {
+        if (pollWorker && !useWorkerFallback) {
+          pollWorker.postMessage({ type: "PAUSE" });
+        } else {
+          stopPoll();
+        }
+      } else if (pollInterval > 0 && lastCapacityReq) {
+        if (pollWorker && !useWorkerFallback) {
+          pollWorker.postMessage({ type: "RESUME" });
+        } else if (!pollTimer) {
+          startPoll(pollInterval);
+        }
+      }
+    }
+
+    // ── 页面上下文点击（React fiber 直接调用 onClick）──────────────
+    if (e.data.type === "SS_CLICK_AT") {
+      if (!_ssNonce || (e.data._ssNonce && e.data._ssNonce !== _ssNonce)) return;
+      const { clickId } = e.data;
+      if (!clickId) return;
+      const el = document.querySelector('[data-ss-click="' + clickId + '"]');
+      if (!el) return;
+
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+
+      // 策略1: 沿 DOM 向上查找 React __reactProps$ / __reactEventHandlers$ 上的 onClick 直接调用
+      let reactHandled = false;
+      let cur = el;
+      for (let depth = 0; depth < 15 && cur && cur !== document.body; depth++) {
+        const keys = Object.keys(cur);
+        for (const key of keys) {
+          if (key.startsWith("__reactProps$") || key.startsWith("__reactEventHandlers$")) {
+            const props = cur[key];
+            if (props && typeof props.onClick === "function") {
+              try {
+                props.onClick({
+                  type: "click", target: el, currentTarget: cur,
+                  preventDefault() {}, stopPropagation() {},
+                  isPropagationStopped() { return false; },
+                  isDefaultPrevented() { return false; },
+                  persist() {},
+                  nativeEvent: new MouseEvent("click", { bubbles: true, clientX: x, clientY: y }),
+                  bubbles: true, cancelable: true, clientX: x, clientY: y,
+                });
+                reactHandled = true;
+              } catch (_) {}
+              break;
+            }
+          }
+        }
+        if (reactHandled) break;
+        cur = cur.parentElement;
+      }
+
+      // 策略2: 无 React handler → 分派完整原生事件序列 + 原生 .click()
+      if (!reactHandled) {
+        const evtInit = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+        el.dispatchEvent(new PointerEvent("pointerdown", evtInit));
+        el.dispatchEvent(new MouseEvent("mousedown", evtInit));
+        el.dispatchEvent(new PointerEvent("pointerup", evtInit));
+        el.dispatchEvent(new MouseEvent("mouseup", evtInit));
+        el.dispatchEvent(new MouseEvent("click", evtInit));
+        el.click();
+      }
     }
   });
 

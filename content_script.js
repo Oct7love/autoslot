@@ -26,6 +26,9 @@
   let candidates = [];
   let cycleIndex = -1;
   let cooldownUntil = 0;
+  let grabInFlight = false; // 抢位流程是否正在执行，防止 API/DOM 并发重复触发
+  let grabSafetyTimer = null; // grabInFlight 超时安全阀
+  let chainTotalRetries = 0; // Confirm 按钮强制点击后的累计重试次数（总超时控制）
   let lastTransition = null;
   let lastCheckTime = null;
   let titleFlashTimer = null;
@@ -38,7 +41,11 @@
   let lastApplyWarehouseTime = 0;
   let pollActive = false; // API 轮询是否已激活（已捕获 capacity 请求参数）
   let pollCount = 0; // API 轮询次数
-  let pollLastLogTime = 0; // 上次打印轮询摘要的时间
+  let pollLastLogTime = Date.now(); // 上次打印轮询摘要的时间
+  let actualPollInterval = 500; // 实际轮询间隔（含退避调整）
+  let pollBackoffLevel = 0; // 当前退避等级
+  let pollMaxBackoffSince = 0; // 持续 L4 的起始时间
+  const POLL_FALLBACK_MS = 300000; // L4 持续 5 分钟 → 回退页面刷新
   const POLL_LOG_INTERVAL = 10000; // 每 10 秒打印一次轮询摘要
   const PREFERRED_WAREHOUSE_REAPPLY_MS = 4000;
 
@@ -113,6 +120,72 @@
     '[class*="dialog"]',
   ].join(",");
 
+  // ── 工具函数：解析首选日期字符串 ──────────────────────────────────
+
+  function parsePreferredDates(str) {
+    if (!str || typeof str === "number") {
+      const n = parseInt(str, 10);
+      return (n >= 1 && n <= 31) ? [n] : [];
+    }
+    const parts = String(str).split(",").map(s => s.trim()).filter(Boolean);
+    const result = new Set();
+    for (const part of parts) {
+      const rangeMatch = part.match(/^(\d{1,2})\s*-\s*(\d{1,2})$/);
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1], 10);
+        const end = parseInt(rangeMatch[2], 10);
+        if (start >= 1 && end <= 31 && start <= end) {
+          for (let i = start; i <= end; i++) result.add(i);
+        }
+      } else {
+        const n = parseInt(part, 10);
+        if (n >= 1 && n <= 31) result.add(n);
+      }
+    }
+    return Array.from(result).sort((a, b) => a - b);
+  }
+
+  // ── 工具函数：时间文本 → 分钟数 ──────────────────────────────────
+
+  function parseTimeToMinutes(str) {
+    if (!str) return -1;
+    const m = str.trim().match(/^(\d{1,2})\s*(am|pm)$/i);
+    if (!m) return -1;
+    let h = parseInt(m[1], 10);
+    const isPm = m[2].toLowerCase() === "pm";
+    if (h === 12) h = isPm ? 12 : 0;
+    else if (isPm) h += 12;
+    return h * 60;
+  }
+
+  // ── 工具函数：判断时段文本是否在范围内 ─────────────────────────────
+
+  function isTimeInRange(slotText, rangeText) {
+    if (!rangeText) return false;
+    const rangeTrimmed = rangeText.trim().toLowerCase();
+    // 解析范围：如 "9am-4pm"
+    const rangeMatch = rangeTrimmed.match(/^(\d{1,2}\s*[ap]m)\s*-\s*(\d{1,2}\s*[ap]m)$/i);
+    if (!rangeMatch) {
+      // 不是有效范围格式 → 退回精确文本匹配
+      return slotText.toLowerCase().replace(/\s+/g, " ").includes(rangeTrimmed.replace(/\s+/g, " "));
+    }
+    const rangeStart = parseTimeToMinutes(rangeMatch[1]);
+    const rangeEnd = parseTimeToMinutes(rangeMatch[2]);
+    if (rangeStart < 0 || rangeEnd < 0) {
+      return slotText.toLowerCase().replace(/\s+/g, " ").includes(rangeTrimmed.replace(/\s+/g, " "));
+    }
+
+    // 从 slotText 提取所有时间点（如 "From 9am - To 11am" → [540, 660]）
+    const timeTokens = slotText.match(/\d{1,2}\s*[ap]m/gi);
+    if (!timeTokens || timeTokens.length === 0) return false;
+
+    const slotMinutes = timeTokens.map(parseTimeToMinutes).filter(m => m >= 0);
+    if (slotMinutes.length === 0) return false;
+
+    // 判断 slot 的所有时间点是否都在范围内
+    return slotMinutes.every(m => m >= rangeStart && m <= rangeEnd);
+  }
+
   // ── 判断是否在 Schedule Shipment 页面 ───────────────────────────
 
   function isScheduleShipmentPage() {
@@ -155,8 +228,8 @@
       if (el.matches('[role="button"], button, a')) score += 30;
       if (el.closest('[class*="slot"], [class*="time"], [class*="card"]')) score += 20;
 
-      const preferredTime = (cfg.preferredTimeText || "").trim().toLowerCase();
-      if (preferredTime && text.toLowerCase().replace(/\s+/g, " ").includes(preferredTime.replace(/\s+/g, " "))) {
+      const preferredTime = (cfg.preferredTimeText || "").trim();
+      if (preferredTime && isTimeInRange(text, preferredTime)) {
         score += 200;
       }
 
@@ -251,6 +324,7 @@
   // ── 自主选择仓库（Ship To 下拉）──────────────────────────────────
 
   let warehouseApplyInProgress = false;
+  let reselectInFlight = false; // 重选仓库流程互斥锁
 
   function applyPreferredWarehouse() {
     const wh = (cfg.preferredWarehouse || "").trim().toUpperCase();
@@ -335,9 +409,14 @@
    * 比 location.reload() 快 5-7 秒
    */
   function triggerWarehouseReselect() {
+    if (reselectInFlight) return; // 已有重选流程在执行，跳过
+    reselectInFlight = true;
+    warehouseApplyInProgress = true; // 阻止 DOM 检测在重选期间误触发
     const wh = (cfg.preferredWarehouse || "").trim().toUpperCase();
     if (!wh) {
       log("warn", "重选仓库: 未设首选仓库，回退到 reload");
+      reselectInFlight = false;
+      warehouseApplyInProgress = false;
       chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
       return;
     }
@@ -345,6 +424,8 @@
     const clickTarget = findDropdownTrigger();
     if (!clickTarget) {
       log("warn", "重选仓库: 未找到下拉触发器，回退到 reload");
+      reselectInFlight = false;
+      warehouseApplyInProgress = false;
       chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
       return;
     }
@@ -385,6 +466,8 @@
         } else {
           log("warn", "重选仓库: 选项未找到，回退到 reload");
           document.body.click();
+          reselectInFlight = false;
+          warehouseApplyInProgress = false;
           chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
         }
         return;
@@ -417,11 +500,15 @@
               log("info", `⚡ 步骤4: 已选回 ${wh}，等待页面刷新数据…`);
               // 页面会自己调 capacity API → injected.js 拦截 → 如果有 slot 会再次触发
               // 同时 DOM 也会更新 → MutationObserver 检测到时段卡片 → 自动抢
+              reselectInFlight = false;
+              warehouseApplyInProgress = false;
               waitForTimeSlotsAfterReselect(0);
               return;
             }
           }
           log("warn", "重选仓库: 选回失败，回退到 reload");
+          reselectInFlight = false;
+          warehouseApplyInProgress = false;
           chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
         }, 500);
       }, 800);
@@ -438,7 +525,7 @@
       log("info", `⚡ 重选后检测到 ${found.length} 个时段卡片，开始抢位！`);
       currentState = "AVAILABLE";
       lastTransition = Date.now();
-      onSlotsAvailable(true);
+      onSlotsAvailable(true, true);
     } else if (attempt < 20) {
       setTimeout(() => waitForTimeSlotsAfterReselect(attempt + 1), 500);
     } else {
@@ -519,18 +606,58 @@
     return "";
   }
 
+  // ── 向上查找实际可点击的容器元素 ─────────────────────────────────
+
+  function findClickableAncestor(el) {
+    let cur = el;
+    // 向上最多遍历 5 层，找 cursor:pointer 且尺寸合理的祖先
+    for (let i = 0; i < 5 && cur && cur !== document.body; i++) {
+      const parent = cur.parentElement;
+      if (!parent) break;
+      const pStyle = getComputedStyle(parent);
+      const pRect = parent.getBoundingClientRect();
+      // 圆形日期按钮通常 30-100px，cursor:pointer
+      if (pStyle.cursor === "pointer" && pRect.width <= 120 && pRect.height <= 120 && pRect.width > 0) {
+        cur = parent;
+      } else {
+        break;
+      }
+    }
+    return cur;
+  }
+
+  // ── 模拟完整点击（委托到页面上下文，兼容 React fiber）─────────────
+
+  let _ssClickSeq = 0;
+  function simulateFullClick(el) {
+    // 用临时 DOM 属性标记目标元素，让页面上下文（injected.js）能精确找到它
+    // 不依赖坐标/elementFromPoint，避免 overlay 遮挡导致点到错误元素
+    const clickId = (++_ssClickSeq).toString(36) + "_" + Date.now().toString(36);
+    el.setAttribute("data-ss-click", clickId);
+    log("info", `[simulateFullClick] 标记元素 <${el.tagName.toLowerCase()}> clickId=${clickId} → 发送 SS_CLICK_AT`);
+    window.postMessage({ type: "SS_CLICK_AT", clickId, _ssNonce }, "*");
+    // 延迟清除标记
+    setTimeout(() => {
+      if (el.getAttribute("data-ss-click") === clickId) el.removeAttribute("data-ss-click");
+    }, 500);
+  }
+
   // ── 点击指定日期（日历上的某一天）────────────────────────────────
 
   function tryClickAvailableDate() {
-    const preferredDay = parseInt(cfg.preferredDate, 10) || 0;
+    const preferredDays = parsePreferredDates(cfg.preferredDate);
 
     // 广泛扫描页面上所有可能是日期的元素
     const all = document.querySelectorAll("*");
-    const candidates = [];
+    const dateCandidates = [];
 
     for (const el of all) {
-      if (el.children.length > 5) continue; // 跳过大容器
+      if (el.children.length > 5) continue;
       if (el.closest("#ss-toast, #ss-slot-label, #ss-safety-banner, #ss-autoclick-overlay")) continue;
+
+      // 跳过轮播/滑块容器（Slick / Swiper / Owl Carousel）
+      const elCls = (el.className || "").toString();
+      if (/slick-slide|slick-list|slick-track|slick-arrow|swiper-slide|owl-item/i.test(elCls)) continue;
 
       const rect = el.getBoundingClientRect();
       if (rect.width < 10 || rect.height < 10 || rect.width > 200 || rect.height > 200) continue;
@@ -538,27 +665,23 @@
       const style = getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
 
-      // 获取元素自身文本（排除子元素干扰）
       const ownText = Array.from(el.childNodes)
         .filter(n => n.nodeType === Node.TEXT_NODE)
         .map(n => n.textContent.trim())
         .join("").trim();
       const fullText = (el.textContent || "").trim();
 
-      // 从自身文本或完整文本中提取日期数字
       let num = 0;
       if (/^\d{1,2}$/.test(ownText)) {
         num = parseInt(ownText, 10);
       } else if (/^\d{1,2}$/.test(fullText)) {
         num = parseInt(fullText, 10);
       } else {
-        // 文本以数字开头（如 "21\nFeb"、"21 available"）
         const m = fullText.match(/^(\d{1,2})\b/);
         if (m) num = parseInt(m[1], 10);
       }
       if (num < 1 || num > 31) continue;
 
-      // 跳过禁用元素
       const isDisabled = el.hasAttribute("disabled") ||
         el.getAttribute("aria-disabled") === "true" ||
         /disabled/i.test(el.className) ||
@@ -567,40 +690,37 @@
       if (isDisabled) continue;
 
       let score = 0;
-      // 首选日期最高分
-      if (preferredDay && num === preferredDay) score += 500;
-      // 有背景色（蓝色圆圈等可用标记）
+      if (preferredDays.length > 0 && preferredDays.includes(num)) score += 500;
       const bg = style.backgroundColor || "";
       if (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") score += 200;
-      // class 包含选中/可用关键词
+      // 排除轮播类名的干扰（slick-active / slick-current 等不应触发加分）
       const cls = (el.className || "") + " " + (el.parentElement?.className || "");
-      if (/selected|active|current|today|primary|available|highlight/i.test(cls)) score += 200;
-      // 在日历容器内
+      const clsClean = cls.replace(/slick-\w+/gi, "");
+      if (/selected|active|current|today|primary|available|highlight/i.test(clsClean)) score += 200;
       if (el.closest('[class*="calendar"], [class*="picker"], [class*="date"], [class*="schedule"]')) score += 150;
-      // role=button/gridcell 加分
       const role = el.getAttribute("role") || "";
       if (/button|gridcell/i.test(role)) score += 100;
-      // 元素是 button/a/td
       if (/^(button|a|td)$/i.test(el.tagName)) score += 80;
-      // 可点击的指针样式
       if (style.cursor === "pointer") score += 100;
-      // 纯数字文本（没有干扰内容）
       if (/^\d{1,2}$/.test(fullText)) score += 50;
+      // ownText 直接包含日期数字 → 更可能是实际日期元素而非容器
+      if (/^\d{1,2}$/.test(ownText)) score += 80;
+      // 圆形/按钮尺寸（20-80px 且接近正方形）→ 日期按钮典型特征
+      const ratio = rect.width / rect.height;
+      if (rect.width >= 20 && rect.width <= 80 && ratio >= 0.7 && ratio <= 1.4) score += 60;
 
-      // 最低分要求：至少要有一些日期特征
       if (score < 100) continue;
 
-      candidates.push({ el, num, score });
+      dateCandidates.push({ el, num, score });
     }
 
-    if (!candidates.length) {
-      log("warn", "tryClickAvailableDate: 未找到任何可点击日期");
-      return false;
+    if (!dateCandidates.length) {
+      log("warn", "tryClickAvailableDate: 主策略未找到日期，启用兜底扫描…");
+      return tryClickDateFallback();
     }
 
-    // 去重：同一数字只保留最高分
     const byNum = {};
-    for (const c of candidates) {
+    for (const c of dateCandidates) {
       if (!byNum[c.num] || c.score > byNum[c.num].score) byNum[c.num] = c;
     }
     const sorted = Object.values(byNum).sort((a, b) => b.score - a.score);
@@ -608,11 +728,78 @@
 
     log("info", `日期候选: ${sorted.map(c => c.num + "号(" + c.score + "分)").join(", ")}`);
 
-    best.el.scrollIntoView({ behavior: "instant", block: "center" });
-    best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-    best.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-    best.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    // 向上查找实际可点击的容器（React 事件通常绑定在外层容器上）
+    const clickTarget = findClickableAncestor(best.el);
+    log("info", `点击目标: <${clickTarget.tagName.toLowerCase()}> class="${(clickTarget.className || "").toString().slice(0, 80)}" cursor=${getComputedStyle(clickTarget).cursor}`);
+
+    clickTarget.scrollIntoView({ behavior: "instant", block: "center" });
+    simulateFullClick(clickTarget);
     log("info", `✅ 步骤1: 已点击日期 ${best.num} 号（得分 ${best.score}）`);
+    return true;
+  }
+
+  // ── 兜底策略：扫描类似日历单元格的小型可点击元素 ──────────────────
+
+  function tryClickDateFallback() {
+    if (!isScheduleShipmentPage()) return false;
+
+    const all = document.querySelectorAll("*");
+    const fallbackCandidates = [];
+
+    for (const el of all) {
+      if (el.children.length > 3) continue;
+      if (el.closest("#ss-toast, #ss-slot-label, #ss-safety-banner, #ss-autoclick-overlay")) continue;
+      // 跳过轮播容器
+      if (/slick-slide|slick-list|slick-track|slick-arrow|swiper-slide|owl-item/i.test((el.className || "").toString())) continue;
+
+      const rect = el.getBoundingClientRect();
+      // 日历单元格：接近正方形，尺寸在 20-80px
+      if (rect.width < 20 || rect.height < 20 || rect.width > 80 || rect.height > 80) continue;
+      const ratio = rect.width / rect.height;
+      if (ratio < 0.5 || ratio > 2.0) continue;
+
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
+      if (style.cursor !== "pointer") continue;
+
+      const isDisabled = el.hasAttribute("disabled") ||
+        el.getAttribute("aria-disabled") === "true" ||
+        /disabled/i.test(el.className) ||
+        style.pointerEvents === "none" ||
+        parseFloat(style.opacity) < 0.4;
+      if (isDisabled) continue;
+
+      const text = (el.textContent || "").trim();
+      const num = parseInt(text, 10);
+      if (isNaN(num) || num < 1 || num > 31) continue;
+
+      let score = 50;
+      const preferredDays = parsePreferredDates(cfg.preferredDate);
+      if (preferredDays.length > 0 && preferredDays.includes(num)) score += 500;
+      const bg = style.backgroundColor || "";
+      if (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") score += 100;
+      if (el.closest('[class*="calendar"], [class*="picker"], [class*="date"]')) score += 100;
+
+      fallbackCandidates.push({ el, num, score });
+    }
+
+    if (!fallbackCandidates.length) {
+      log("warn", "tryClickAvailableDate: 兜底策略也未找到日期元素");
+      return false;
+    }
+
+    fallbackCandidates.sort((a, b) => b.score - a.score);
+
+    log("info", `[兜底] 日期候选: ${fallbackCandidates.slice(0, 5).map(c => c.num + "号(" + c.score + "分)").join(", ")}`);
+
+    const best = fallbackCandidates[0];
+
+    const clickTarget = findClickableAncestor(best.el);
+    log("info", `[兜底] 点击目标: <${clickTarget.tagName.toLowerCase()}> class="${(clickTarget.className || "").toString().slice(0, 80)}" cursor=${getComputedStyle(clickTarget).cursor}`);
+
+    clickTarget.scrollIntoView({ behavior: "instant", block: "center" });
+    simulateFullClick(clickTarget);
+    log("info", `✅ [兜底] 步骤1: 已点击日期 ${best.num} 号（得分 ${best.score}）`);
     return true;
   }
 
@@ -668,11 +855,17 @@
       if (autoRefreshEnabled && armed && currentState !== "AVAILABLE") {
         // API 轮询已激活时跳过页面刷新，轮询本身就是"刷新"
         if (pollActive) {
-          log("info", "跳过页面刷新（API 轮询已激活，无需 reload）");
-          startAutoRefresh();
-          return;
+          const stuckAtMax = pollMaxBackoffSince > 0 &&
+            (Date.now() - pollMaxBackoffSince) > POLL_FALLBACK_MS;
+          if (!stuckAtMax) {
+            log("info", "跳过页面刷新（API 轮询已激活，无需 reload）");
+            startAutoRefresh();
+            return;
+          }
+          log("warn", "⚠️ API 轮询长期限流(L4 超5分钟)，回退到页面刷新");
+        } else {
+          log("info", "自动刷新页面…");
         }
-        log("info", "自动刷新页面…");
         location.reload();
       } else {
         startAutoRefresh();
@@ -792,13 +985,20 @@
       // 仓库下拉操作中 DOM 会瞬间变化，禁止误触发
       if (warehouseApplyInProgress) return;
       // capacity API 确认无仓位 → 禁止 DOM 检测覆盖
-      if (capacityLock) return;
+      let skipDate = false;
+      if (capacityLock) {
+        const timeCards = detectTimeSlotCards();
+        if (timeCards.length === 0) return;
+        capacityLock = false;
+        skipDate = true; // 时段卡片已在页面，跳过日期点击
+        log("info", "⚡ 页面已有时段卡片，capacityLock 自动解锁");
+      }
       // 二次确认：确保 "No slots available" 确实消失了
       if (detectSoldOut()) return;
       currentState = "AVAILABLE";
       lastTransition = Date.now();
       log("info", "⚡ 仓位出现了！'No slots available' 已消失！");
-      onSlotsAvailable();
+      onSlotsAvailable(false, skipDate);
     }, ms);
   }
 
@@ -870,8 +1070,8 @@
       const isDirectAction = /^(book|select|reserve|schedule|confirm)\b/i.test(text.trim());
 
       let timeMatchBonus = 0;
-      const preferredTime = (cfg.preferredTimeText || "").trim().toLowerCase();
-      if (preferredTime && combined.includes(preferredTime.replace(/\s+/g, " "))) {
+      const preferredTime = (cfg.preferredTimeText || "").trim();
+      if (preferredTime && isTimeInRange(combined, preferredTime)) {
         timeMatchBonus = 200;
       }
 
@@ -902,9 +1102,24 @@
     return tag + id + cls;
   }
 
+  // ── 抢位流程结束恢复 ────────────────────────────────────────────
+
+  function finishGrab() {
+    if (!grabInFlight) return;
+    grabInFlight = false;
+    clearTimeout(grabSafetyTimer);
+    sendPollConfig();
+    if (autoRefreshEnabled && armed) startAutoRefresh();
+  }
+
   // ── 当 slot 可用时 ──────────────────────────────────────────────
 
-  function onSlotsAvailable(fromApi) {
+  function onSlotsAvailable(fromApi, skipDate) {
+    if (grabInFlight) {
+      log("info", "抢位流程已在执行中，跳过重复触发");
+      return;
+    }
+
     chrome.runtime.sendMessage({
       type: "SLOTS_AVAILABLE",
       count: 1,
@@ -916,16 +1131,34 @@
     if (cfg.soundEnabled) playBeep();
 
     if (autoClickEnabled) {
-      performFullGrab(fromApi);
+      grabInFlight = true;
+      // 安全阀：30s 后自动释放锁，防止流程异常导致永久卡死
+      clearTimeout(grabSafetyTimer);
+      grabSafetyTimer = setTimeout(() => {
+        if (grabInFlight) {
+          log("warn", "⚠️ grabInFlight 超时 30s 未释放，自动解锁");
+          grabInFlight = false;
+        }
+      }, 30000);
+      performFullGrab(fromApi, skipDate);
+    } else {
+      log("info", "⚠️ 自动抢位未启用（autoClick=false），仅显示通知");
     }
 
     cooldownUntil = Date.now() + 15000;
     stopAutoRefresh();
+    window.postMessage({
+      type: "SS_SET_POLL",
+      interval: cfg.pollInterval || 500,
+      paused: true,
+      pauseDuration: 16000,
+      _ssNonce,
+    }, "*");
   }
 
   // ── 完整自动抢位流程：选日期 → 等时段出现 → 选时段 → Confirm ──
 
-  function performFullGrab(fromApi) {
+  function performFullGrab(fromApi, skipDate) {
     // API 触发 → 零延迟立刻抢；DOM 触发 → 使用配置的延迟
     const delay = fromApi ? 0 : (cfg.autoClickDelay || 500);
     if (delay > 0) showAutoClickOverlay(delay, null);
@@ -936,14 +1169,20 @@
     const doGrab = () => {
       if (!armed || !autoClickEnabled) {
         log("info", "自动抢位已取消（手动暂停）");
+        finishGrab();
         hideAutoClickOverlay();
         return;
       }
 
       // ── 步骤 1: 点击日历上出现的可用日期 ──
-      const dateClicked = tryClickAvailableDate();
-      if (!dateClicked) {
-        log("info", "步骤1: 日历上未找到可点击日期，直接查找时段卡片");
+      let dateClicked = false;
+      if (!skipDate) {
+        dateClicked = tryClickAvailableDate();
+        if (!dateClicked) {
+          log("info", "步骤1: 日历上未找到可点击日期，直接查找时段卡片");
+        }
+      } else {
+        log("info", "步骤1: 跳过日期点击（时段卡片已在页面）");
       }
 
       // ── 步骤 2: 等页面响应（点日期后需要时间加载时段），然后找时段卡片并点击 ──
@@ -961,6 +1200,7 @@
 
   function waitForTimeSlots(attempt) {
     if (!armed || !autoClickEnabled) {
+      finishGrab();
       hideAutoClickOverlay();
       return;
     }
@@ -973,10 +1213,7 @@
       for (let i = 0; i < found.length; i++) {
         const card = found[i];
         card.el.scrollIntoView({ behavior: "instant", block: "center" });
-        // React/Ant Design 需要完整鼠标事件序列才能触发状态变化（白→蓝）
-        card.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-        card.el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-        card.el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+        simulateFullClick(card.el);
         log("info", `✅ 步骤2: 已点击时段 [${i + 1}/${found.length}] "${card.text}"`);
       }
 
@@ -990,10 +1227,7 @@
             (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent");
           if (!isSelected && card.el.parentElement) {
             log("info", `时段 "${card.text}" 未变蓝，尝试点击父元素`);
-            const parent = card.el.parentElement;
-            parent.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
-            parent.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
-            parent.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            simulateFullClick(card.el.parentElement);
           }
         }
       }, 300);
@@ -1004,7 +1238,10 @@
       if (cfg.autoClickChain) {
         log("info", "步骤3: 等待 Confirm slot 按钮…");
         chainRetryCount = 0;
+        chainTotalRetries = 0;
         setTimeout(() => chainNextClick(), 1500);
+      } else {
+        finishGrab();
       }
     } else if (attempt < MAX_WAIT_TIMESLOT_ATTEMPTS) {
       // 每5次尝试滚动页面，刺激懒加载渲染
@@ -1019,6 +1256,7 @@
     } else {
       // 超时仍未出现 → 尝试刷新页面重来
       log("warn", "等待 20s 超时：时段卡片未出现，刷新页面重试");
+      grabInFlight = false;
       hideAutoClickOverlay();
       chrome.storage.local.set({ urgentGrab: true, urgentGrabTime: Date.now() }, () => location.reload());
     }
@@ -1030,7 +1268,10 @@
   const CHAIN_MAX_RETRIES = 8;
 
   function chainNextClick() {
-    if (!armed || !autoClickEnabled) return;
+    if (!armed || !autoClickEnabled) {
+      finishGrab();
+      return;
+    }
 
     const confirmKeywords = ["confirm", "confirm slot", "yes", "submit", "proceed", "continue", "ok", "done", "save", "apply"];
 
@@ -1061,10 +1302,17 @@
           log("info", `Confirm 按钮暂时不可点(disabled)，等待中… (${chainRetryCount}/${CHAIN_MAX_RETRIES})`);
           setTimeout(() => chainNextClick(), 800);
         } else {
-          log("warn", "Confirm 按钮持续 disabled，尝试强制点击");
+          log("warn", "Confirm 按钮持续 disabled，强制点击并继续等待");
           el.scrollIntoView({ behavior: "instant", block: "center" });
           el.click();
           chainRetryCount = 0;
+          chainTotalRetries += CHAIN_MAX_RETRIES;
+          if (chainTotalRetries >= 38) { // ~30s 总超时
+            log("warn", "Confirm 按钮超时 30s 仍不可用，放弃");
+            finishGrab();
+            return;
+          }
+          setTimeout(() => chainNextClick(), 800);
         }
         return;
       }
@@ -1091,6 +1339,7 @@
     // #1: 链式点击结束兜底通知
     log("info", "链式点击结束 — 没有更多确认按钮");
     chainRetryCount = 0;
+    finishGrab();
     try {
       chrome.runtime.sendMessage({ type: "AUTO_CLICK_DONE" });
     } catch (_) {}
@@ -1291,6 +1540,7 @@
 
       case "SET_AUTO_CLICK":
         autoClickEnabled = msg.on;
+        if (!msg.on) finishGrab();
         log("info", "自动点击: " + (msg.on ? "开启" : "关闭"));
         break;
 
@@ -1418,11 +1668,26 @@
       if (e.data._ssNonce !== _ssNonce) return;
     }
 
-    // capacity 请求参数已捕获，启动轮询
+    // Worker PAUSE_FOR 超时后自动恢复
+    if (e.data.type === "SS_POLL_RESUMED") {
+      cooldownUntil = 0;
+      capacityLock = true;
+      if (currentState === "AVAILABLE") currentState = "SOLD_OUT";
+      if (autoRefreshEnabled && armed) startAutoRefresh();
+      log("info", "⏱ 冷却结束，轮询已自动恢复");
+      return;
+    }
+
+    // capacity 请求参数已捕获，启动轮询（首次打日志，重复时只同步配置）
     if (e.data.type === "SS_POLL_READY") {
-      pollActive = true;
-      log("info", `🔄 capacity API 参数已捕获，启动轮询（${cfg.pollInterval || 500}ms）— 页面不刷新，仅API轮询`);
-      sendPollConfig();
+      if (!pollActive) {
+        pollActive = true;
+        pollBackoffLevel = 0;
+        pollMaxBackoffSince = 0;
+        actualPollInterval = Math.max(cfg.pollInterval || 500, 500);
+        log("info", `🔄 capacity API 参数已捕获，启动轮询（${actualPollInterval}ms）— 页面不刷新，仅API轮询`);
+      }
+      sendPollConfig(); // 始终同步 pause/interval 配置给 injected.js
       return;
     }
 
@@ -1444,6 +1709,13 @@
 
     // 轮询退避通知
     if (e.data.type === "SS_POLL_BACKOFF") {
+      actualPollInterval = e.data.interval;
+      pollBackoffLevel = e.data.level;
+      if (e.data.level >= 4) {
+        if (pollMaxBackoffSince === 0) pollMaxBackoffSince = Date.now();
+      } else {
+        pollMaxBackoffSince = 0;
+      }
       log("warn", `[轮询] ${e.data.reason} → 间隔调整为 ${e.data.interval}ms（退避等级 ${e.data.level}）`);
       return;
     }
@@ -1465,32 +1737,33 @@
       const now = Date.now();
 
       if (!d.isSoldOut && d.slotCount > 0) {
-        // ═══ 发现仓位！═══
-        window.postMessage({ type: "SS_SET_POLL", interval: cfg.pollInterval || 500, paused: true, _ssNonce }, "*");
+        // ═══ 发现仓位！立即暂停轮询 + 本地冷却双保险 ═══
         log("info", `⚡⚡⚡ [第${pollCount}次轮询] 检测到 ${d.slotCount} 个可用 slot！！！`);
+        cooldownUntil = now + 16000; // 本地冷却：后续 SS_API_RESPONSE 在 :1673 处被拦截
+        window.postMessage({ type: "SS_SET_POLL", interval: actualPollInterval, paused: true, pauseDuration: 16000, _ssNonce }, "*");
+
+        capacityLock = false;
+        currentState = "AVAILABLE";
+        lastTransition = now;
 
         const timeCards = detectTimeSlotCards();
         if (timeCards.length > 0) {
-          capacityLock = false;
           log("info", `⚡ 页面已有 ${timeCards.length} 个时段卡片，直接零延迟抢位！`);
-          currentState = "AVAILABLE";
-          lastTransition = now;
-          onSlotsAvailable(true);
+          onSlotsAvailable(true, true);  // skipDate=true，时段已在页面
         } else {
-          // 页面 UI 没更新 → 重选仓库触发页面自己刷新（比 reload 快 5-7 秒）
-          capacityLock = false;
-          log("info", "⚡ 页面 UI 未更新，重选仓库触发刷新…");
-          triggerWarehouseReselect();
+          // 页面无时段卡片 → 交给 performFullGrab 点日期→等时段→抢位
+          log("info", "⚡ API 确认有仓位，进入抢位流程（点日期→选时段）");
+          onSlotsAvailable(true, false); // skipDate=false，需要先点日期
         }
       } else {
         // ═══ 无仓位，定期打印摘要 ═══
         capacityLock = true;
         if (currentState !== "SOLD_OUT") {
-          log("info", `[轮询] 第${pollCount}次检测 — 无仓位，持续监测中（${cfg.pollInterval || 500}ms/次）`);
+          log("info", `[轮询] 第${pollCount}次检测 — 无仓位，持续监测中（${actualPollInterval}ms/次）`);
           pollLastLogTime = now;
         } else if (now - pollLastLogTime >= POLL_LOG_INTERVAL) {
           const elapsed = Math.round((now - pollLastLogTime) / 1000);
-          log("info", `[轮询] 已检测 ${pollCount} 次 | 最近 ${elapsed}s 均无仓位 | 间隔 ${cfg.pollInterval || 500}ms`);
+          log("info", `[轮询] 已检测 ${pollCount} 次 | 最近 ${elapsed}s 均无仓位 | 间隔 ${actualPollInterval}ms`);
           pollLastLogTime = now;
         }
         currentState = "SOLD_OUT";
@@ -1508,6 +1781,7 @@
     if (location.href !== lastUrl) {
       lastUrl = location.href;
       currentState = "UNKNOWN";
+      pollActive = false;
       candidates = [];
       clearHighlights();
       cooldownUntil = 0;
@@ -1519,6 +1793,7 @@
 
   window.addEventListener("hashchange", () => {
     currentState = "UNKNOWN";
+    pollActive = false;
     cooldownUntil = 0;
     setTimeout(runDetection, 300);
   });
