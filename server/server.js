@@ -121,6 +121,28 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── 删除指定实例及其日志 ──────────────────────────────────────
+  if (req.method === "POST" && url.pathname === "/api/client/remove") {
+    try {
+      const data = await parseBody(req);
+      const id = data.clientId;
+      if (id && states[id]) {
+        delete states[id];
+        logs = logs.filter((e) => {
+          const cid = e.tabId != null ? String(e.tabId) : (e.clientId || null);
+          return cid !== id;
+        });
+        broadcast("client_removed", { clientId: id });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end('{"ok":true}');
+      } else {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end('{"error":"not found"}');
+      }
+    } catch (_) { res.writeHead(400); res.end("Bad Request"); }
+    return;
+  }
+
   res.writeHead(404); res.end("Not Found");
 });
 

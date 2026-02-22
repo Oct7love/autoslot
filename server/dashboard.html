@@ -39,9 +39,18 @@
     }
     .sidebar h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: #555; margin-bottom: 12px; }
     .card {
+      position: relative;
       background: #111119; border: 1px solid #1a1a2e; border-radius: 8px;
-      padding: 12px; margin-bottom: 10px;
+      padding: 12px; margin-bottom: 10px; cursor: pointer; transition: border-color .15s, background .15s;
     }
+    .card:hover { border-color: #3a3a5e; }
+    .card.selected { border-color: #4db6ac; background: #11191d; }
+    .card-del {
+      position: absolute; top: 6px; right: 8px;
+      background: none; border: none; color: #444; font-size: 14px;
+      cursor: pointer; padding: 2px 6px; border-radius: 4px; line-height: 1;
+    }
+    .card-del:hover { color: #ef5350; background: #ef535015; }
     .card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
     .cd { width: 8px; height: 8px; border-radius: 50%; background: #555; }
     .cd.armed { background: #66bb6a; }
@@ -70,6 +79,7 @@
     .le.warn .msg { color: #ffcc80; }
     .le.error .msg { color: #ef9a9a; }
     .le.hl { background: #1b5e2015; border-left: 3px solid #00e676; padding-left: 8px; }
+    .le.hidden { display: none; }
     .empty { text-align: center; color: #333; padding: 60px 0; font-size: 14px; }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
     .overlay {
@@ -108,6 +118,7 @@
   </div>
   <div class="toolbar">
     <span class="info" id="tbInfo">扩展: 0 个在线</span>
+    <span id="tbFilter" style="font-size:11px;color:#4db6ac;display:none"></span>
     <span style="flex:1"></span>
     <button id="btnSound">声音通知</button>
     <button id="btnClear">清除日志</button>
@@ -139,8 +150,9 @@ let es = null;
 let autoScroll = true;
 let soundOn = false;
 let stateMap = {};
+let selectedClientId = null;
 
-const connDot = $("connDot"), connText = $("connText"), tbInfo = $("tbInfo");
+const connDot = $("connDot"), connText = $("connText"), tbInfo = $("tbInfo"), tbFilter = $("tbFilter");
 const cards = $("cards"), ls = $("ls");
 const ov = $("ov"), tkIn = $("tkIn"), tkBtn = $("tkBtn"), tkErr = $("tkErr");
 const btnSound = $("btnSound"), btnClear = $("btnClear"), btnScroll = $("btnScroll");
@@ -222,6 +234,19 @@ function connect(tk) {
     renderCards();
   });
 
+  es.addEventListener("client_removed", (e) => {
+    const d = JSON.parse(e.data);
+    const id = d.clientId;
+    delete stateMap[id];
+    if (selectedClientId === id) selectedClientId = null;
+    const card = cards.querySelector('.card[data-client-id="' + id + '"]');
+    if (card) card.remove();
+    ls.querySelectorAll('.le[data-client="' + id + '"]').forEach((el) => el.remove());
+    if (!ls.querySelector(".le")) ls.innerHTML = '<div class="empty">日志已清除</div>';
+    renderCards();
+    filterLogs();
+  });
+
   es.addEventListener("error", () => {
     connDot.classList.remove("ok");
     if (es.readyState === 2) {
@@ -240,12 +265,23 @@ function connect(tk) {
 
 const HL_RE = /仓位出现|SLOT|已自动点击|API拦截.*非售罄|已选择仓库|Confirm/i;
 
+function getLogClientId(entry) {
+  if (entry.tabId != null) return String(entry.tabId);
+  if (entry.clientId) return entry.clientId;
+  return null;
+}
+
 function appendLog(entry, notify) {
   if (ls.querySelector(".empty")) ls.innerHTML = "";
   const div = document.createElement("div");
   const lv = entry.level || "info";
   const hl = HL_RE.test(entry.message || "");
+  const cid = getLogClientId(entry);
   div.className = "le " + lv + (hl ? " hl" : "");
+  if (cid) div.dataset.client = cid;
+
+  // 选中某实例时，不匹配的日志隐藏
+  if (selectedClientId && cid && cid !== selectedClientId) div.classList.add("hidden");
 
   const ts = entry.ts
     ? new Date(entry.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
@@ -260,16 +296,39 @@ function appendLog(entry, notify) {
 
 // ── 状态卡片 ────────────────────────────────────────────────────
 
+function onCardClick(id) {
+  selectedClientId = selectedClientId === id ? null : id;
+  renderCards();
+  filterLogs();
+}
+
 function renderCards() {
   const ids = Object.keys(stateMap);
   tbInfo.textContent = "扩展: " + ids.length + " 个在线";
   if (!ids.length) { cards.innerHTML = '<div class="no-ext">等待扩展连接…</div>'; return; }
 
-  cards.innerHTML = "";
+  // 清除占位符
+  const ph = cards.querySelector(".no-ext");
+  if (ph) ph.remove();
+
+  // 移除已下线实例的卡片
+  cards.querySelectorAll(".card").forEach((c) => {
+    if (!ids.includes(c.dataset.clientId)) c.remove();
+  });
+
   for (const id of ids) {
     const s = stateMap[id];
-    const c = document.createElement("div");
-    c.className = "card";
+
+    // 复用已存在的卡片 DOM，不存在才新建
+    let c = cards.querySelector('.card[data-client-id="' + id + '"]');
+    if (!c) {
+      c = document.createElement("div");
+      c.dataset.clientId = id;
+      c.addEventListener("click", () => onCardClick(id));
+      cards.appendChild(c);
+    }
+
+    c.className = "card" + (selectedClientId === id ? " selected" : "");
 
     let dc = "cd", txt = "未知";
     if (!s.armed) { dc += " paused"; txt = "已暂停"; }
@@ -282,14 +341,67 @@ function renderCards() {
       : "-";
 
     c.innerHTML = `
+      <button class="card-del" data-del="${id}" title="删除此实例">×</button>
       <div class="card-head"><span class="${dc}"></span><span class="card-title">${txt}</span></div>
       <div class="card-body">
+        <b>Tab #${id}</b> ${selectedClientId === id ? '<span style="color:#4db6ac;font-size:10px">● 筛选中</span>' : ""}<br>
         <b>自动点击:</b> ${s.autoClick ? "开" : "关"} | <b>自动刷新:</b> ${s.autoRefresh ? "开" : "关"}<br>
         <b>最后检测:</b> ${lc}<br>
         <b>URL:</b> ${esc((s.tabUrl || "").slice(0, 55))}
       </div>`;
-    cards.appendChild(c);
+
+    // 删除按钮事件（阻止冒泡，避免触发卡片选中）
+    c.querySelector(".card-del").addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      removeClient(id);
+    });
   }
+}
+
+// ── 删除实例 ─────────────────────────────────────────────────────
+
+function removeClient(id) {
+  if (!confirm("删除 Tab #" + id + " 及其所有日志？")) return;
+  fetch("/api/client/remove", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": "Bearer " + token,
+    },
+    body: JSON.stringify({ clientId: id }),
+  }).then((r) => {
+    if (!r.ok) { alert("删除失败 (HTTP " + r.status + ")，请确认 server.js 已重启"); return; }
+    delete stateMap[id];
+    if (selectedClientId === id) selectedClientId = null;
+    const card = cards.querySelector('.card[data-client-id="' + id + '"]');
+    if (card) card.remove();
+    ls.querySelectorAll('.le[data-client="' + id + '"]').forEach((el) => el.remove());
+    if (!ls.querySelector(".le")) ls.innerHTML = '<div class="empty">日志已清除</div>';
+    renderCards();
+    filterLogs();
+  }).catch((e) => { alert("请求失败: " + e.message); });
+}
+
+// ── 日志筛选 ─────────────────────────────────────────────────────
+
+function filterLogs() {
+  const entries = ls.querySelectorAll(".le");
+  for (const el of entries) {
+    const cid = el.dataset.client;
+    if (!selectedClientId || !cid || cid === selectedClientId) {
+      el.classList.remove("hidden");
+    } else {
+      el.classList.add("hidden");
+    }
+  }
+  // 工具栏筛选指示
+  if (selectedClientId) {
+    tbFilter.style.display = "inline";
+    tbFilter.textContent = "筛选: Tab #" + selectedClientId;
+  } else {
+    tbFilter.style.display = "none";
+  }
+  if (autoScroll) scrollBottom();
 }
 
 // ── 工具栏 ──────────────────────────────────────────────────────
@@ -300,7 +412,15 @@ btnSound.addEventListener("click", () => {
   btnSound.textContent = soundOn ? "声音通知 ✓" : "声音通知";
 });
 
-btnClear.addEventListener("click", () => { ls.innerHTML = '<div class="empty">日志已清除</div>'; });
+btnClear.addEventListener("click", () => {
+  if (selectedClientId) {
+    // 只清除当前筛选实例的日志
+    ls.querySelectorAll('.le[data-client="' + selectedClientId + '"]').forEach((el) => el.remove());
+    if (!ls.querySelector(".le")) ls.innerHTML = '<div class="empty">日志已清除</div>';
+  } else {
+    ls.innerHTML = '<div class="empty">日志已清除</div>';
+  }
+});
 
 btnScroll.addEventListener("click", () => {
   autoScroll = !autoScroll;

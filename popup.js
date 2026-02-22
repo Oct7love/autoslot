@@ -43,6 +43,7 @@ const btnRefresh        = $("#btnRefresh");
 const btnTestHL         = $("#btnTestHighlight");
 const btnClearLogs      = $("#btnClearLogs");
 const logPanel          = $("#logPanel");
+const btnLogFilter      = $("#btnLogFilter");
 const candidateInfo     = $("#candidateInfo");
 const candidateList     = $("#candidateList");
 
@@ -73,51 +74,82 @@ const btnTestRemote      = $("#btnTestRemote");
 
 const DAY_LABELS = ["日", "一", "二", "三", "四", "五", "六"];
 
+let currentTabId = null;
+let logFilterTab = true;
+
 // ── Load config ────────────────────────────────────────────────────
 
-chrome.storage.local.get(null, (cfg) => {
-  togAutoClick.checked      = !!cfg.autoClick;
-  togAutoClickChain.checked = !!cfg.autoClickChain;
-  autoClickDelay.value      = cfg.autoClickDelay || 500;
-  autoClickDelayVal.textContent = (cfg.autoClickDelay || 500) + "ms";
-  togAutoRefresh.checked    = !!cfg.autoRefresh;
-  refreshInterval.value     = cfg.autoRefreshSec || 30;
-  refreshIntervalVal.textContent = (cfg.autoRefreshSec || 30) + "s";
-  togScroll.checked         = cfg.autoScroll !== false;
-  togFocus.checked          = cfg.autoFocus !== false;
-  togHighlight.checked      = cfg.highlightOn !== false;
-  togTitle.checked          = cfg.titleFlash !== false;
-  togSound.checked          = !!cfg.soundEnabled;
-  notifMode.value           = cfg.notifMode || "toast";
-  pollIntervalEl.value      = cfg.pollInterval || 500;
-  pollIntervalVal.textContent = formatPollInterval(cfg.pollInterval || 500);
-  debounceSlider.value      = cfg.debounceMs || 100;
-  debounceVal.textContent   = (cfg.debounceMs || 100) + "ms";
-  togSchedule.checked       = !!cfg.scheduleEnabled;
-  togEmail.checked          = !!cfg.emailEnabled;
-  emailAddress.value        = cfg.emailAddress || "";
-  togEmailOnAvail.checked   = cfg.emailOnAvailable !== false;
-  togEmailOnClicked.checked = cfg.emailOnClicked !== false;
-  emailServiceId.value      = cfg.emailServiceId || "";
-  emailTemplateId.value     = cfg.emailTemplateId || "";
-  emailPublicKey.value      = cfg.emailPublicKey || "";
+chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+  currentTabId = tabs[0]?.id || null;
 
-  preferredWarehouse.value  = (cfg.preferredWarehouse || "").trim();
-  preferredDate.value       = cfg.preferredDate ? String(cfg.preferredDate) : "";
-  preferredTimeText.value   = (cfg.preferredTimeText || "").trim();
+  chrome.storage.local.get(null, (cfg) => {
+    togAutoClick.checked      = !!cfg.autoClick;
+    togAutoClickChain.checked = !!cfg.autoClickChain;
+    autoClickDelay.value      = cfg.autoClickDelay || 500;
+    autoClickDelayVal.textContent = (cfg.autoClickDelay || 500) + "ms";
+    togAutoRefresh.checked    = !!cfg.autoRefresh;
+    refreshInterval.value     = cfg.autoRefreshSec || 30;
+    refreshIntervalVal.textContent = (cfg.autoRefreshSec || 30) + "s";
+    togScroll.checked         = cfg.autoScroll !== false;
+    togFocus.checked          = cfg.autoFocus !== false;
+    togHighlight.checked      = cfg.highlightOn !== false;
+    togTitle.checked          = cfg.titleFlash !== false;
+    togSound.checked          = !!cfg.soundEnabled;
+    notifMode.value           = cfg.notifMode || "toast";
+    pollIntervalEl.value      = cfg.pollInterval || 500;
+    pollIntervalVal.textContent = formatPollInterval(cfg.pollInterval || 500);
+    debounceSlider.value      = cfg.debounceMs || 100;
+    debounceVal.textContent   = (cfg.debounceMs || 100) + "ms";
+    togSchedule.checked       = !!cfg.scheduleEnabled;
+    togEmail.checked          = !!cfg.emailEnabled;
+    emailAddress.value        = cfg.emailAddress || "";
+    togEmailOnAvail.checked   = cfg.emailOnAvailable !== false;
+    togEmailOnClicked.checked = cfg.emailOnClicked !== false;
+    emailServiceId.value      = cfg.emailServiceId || "";
+    emailTemplateId.value     = cfg.emailTemplateId || "";
+    emailPublicKey.value      = cfg.emailPublicKey || "";
 
-  if (remoteUrl) remoteUrl.value     = (cfg.remoteUrl || "").trim();
-  if (remoteToken) remoteToken.value = (cfg.remoteToken || "").trim();
+    // 偏好：优先使用当前标签页的独立设置
+    const tabPrefs = currentTabId ? (cfg.tabPreferences || {})[currentTabId] : null;
+    preferredWarehouse.value  = ((tabPrefs?.preferredWarehouse ?? cfg.preferredWarehouse) || "").trim();
+    preferredDate.value       = (() => {
+      const v = tabPrefs?.preferredDate ?? cfg.preferredDate;
+      return (v != null && v !== 0 && v !== "") ? String(v) : "";
+    })();
+    preferredTimeText.value   = ((tabPrefs?.preferredTimeText ?? cfg.preferredTimeText) || "").trim();
 
-  updateArmUI(cfg.armed !== false);
-  renderSchedules(cfg.schedules || []);
-  renderDomains(cfg.customDomains || []);
-  renderLogs(cfg.logs || []);
-  updateScheduleStatusUI();
-  initMultiWindowsSection();
+    // 显示当前标签页标识
+    const prefTabTag = document.getElementById("prefTabTag");
+    if (prefTabTag && currentTabId) {
+      prefTabTag.textContent = tabPrefs ? `[Tab #${currentTabId}]` : `[Tab #${currentTabId} · 继承全局]`;
+    }
+
+    // 新标签页首次打开时，立即创建独立偏好副本
+    if (currentTabId && !tabPrefs) {
+      const initPrefs = {
+        preferredWarehouse: preferredWarehouse.value,
+        preferredDate: preferredDate.value,
+        preferredTimeText: preferredTimeText.value,
+      };
+      chrome.storage.local.get("tabPreferences", ({ tabPreferences = {} }) => {
+        tabPreferences[currentTabId] = initPrefs;
+        chrome.storage.local.set({ tabPreferences });
+      });
+    }
+
+    if (remoteUrl) remoteUrl.value     = (cfg.remoteUrl || "").trim();
+    if (remoteToken) remoteToken.value = (cfg.remoteToken || "").trim();
+
+    updateArmUI(cfg.armed !== false);
+    renderSchedules(cfg.schedules || []);
+    renderDomains(cfg.customDomains || []);
+    renderLogs(cfg.logs || []);
+    updateScheduleStatusUI();
+    initMultiWindowsSection();
+  });
+
+  requestState();
 });
-
-requestState();
 
 // ══════════════════════════════════════════════════════════════════
 //  监控网址管理
@@ -497,16 +529,28 @@ autoClickDelay.addEventListener("input", () => {
 
 function savePreferenceAndNotify() {
   const warehouse = preferredWarehouse.value.trim();
-  const dateRaw = preferredDate.value.trim();
-  const dateNum = dateRaw ? Math.max(1, Math.min(31, parseInt(dateRaw, 10))) : 0;
+  const dateStr = preferredDate.value.trim();
   const timeText = preferredTimeText.value.trim();
-  const updates = {
+  const prefs = {
     preferredWarehouse: warehouse,
-    preferredDate: dateNum || 0,
+    preferredDate: dateStr,
     preferredTimeText: timeText,
   };
-  chrome.storage.local.set(updates);
-  sendToContent({ type: "CONFIG_UPDATED", cfg: updates });
+
+  // 按标签页独立存储偏好
+  if (currentTabId) {
+    chrome.storage.local.get("tabPreferences", ({ tabPreferences = {} }) => {
+      tabPreferences[currentTabId] = prefs;
+      chrome.storage.local.set({ tabPreferences, ...prefs });
+    });
+    // 更新标识
+    const prefTabTag = document.getElementById("prefTabTag");
+    if (prefTabTag) prefTabTag.textContent = `[Tab #${currentTabId}]`;
+  } else {
+    chrome.storage.local.set(prefs);
+  }
+
+  sendToContent({ type: "CONFIG_UPDATED", cfg: prefs });
 }
 
 preferredWarehouse.addEventListener("input", savePreferenceAndNotify);
@@ -583,19 +627,39 @@ btnForceCheck.addEventListener("click", () => sendToContent({ type: "FORCE_CHECK
 btnRefresh.addEventListener("click", () => sendToContent({ type: "FORCE_REFRESH" }));
 btnTestHL.addEventListener("click", () => sendToContent({ type: "TEST_HIGHLIGHT" }));
 btnClearLogs.addEventListener("click", () => {
-  chrome.storage.local.set({ logs: [] });
-  logPanel.innerHTML = '<div class="empty-log">日志已清除</div>';
+  if (logFilterTab && currentTabId) {
+    chrome.storage.local.get("logs", ({ logs = [] }) => {
+      logs = logs.filter((e) => e.tabId !== currentTabId);
+      chrome.storage.local.set({ logs });
+      logPanel.innerHTML = '<div class="empty-log">日志已清除</div>';
+    });
+  } else {
+    chrome.storage.local.set({ logs: [] });
+    logPanel.innerHTML = '<div class="empty-log">日志已清除</div>';
+  }
+});
+
+// ── 日志过滤切换 ─────────────────────────────────────────────────────
+
+btnLogFilter.addEventListener("click", () => {
+  logFilterTab = !logFilterTab;
+  btnLogFilter.textContent = logFilterTab ? "仅当前" : "全部";
+  btnLogFilter.style.color = logFilterTab ? "#4db6ac" : "#888";
+  chrome.storage.local.get("logs", ({ logs = [] }) => renderLogs(logs));
 });
 
 // ── Logs ───────────────────────────────────────────────────────────
 
 function renderLogs(logs) {
-  if (!logs.length) {
+  const filtered = logFilterTab && currentTabId
+    ? logs.filter((e) => e.tabId === currentTabId || !e.tabId)
+    : logs;
+  if (!filtered.length) {
     logPanel.innerHTML = '<div class="empty-log">暂无活动记录</div>';
     return;
   }
   logPanel.innerHTML = "";
-  const recent = logs.slice(-60);
+  const recent = filtered.slice(-60);
   for (const entry of recent) {
     const div = document.createElement("div");
     div.className = "log-entry " + (entry.level || "info");

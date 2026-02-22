@@ -34,11 +34,12 @@ const DEFAULTS = {
   emailOnClicked: true,
   customDomains: [],
   preferredWarehouse: "",
-  preferredDate: 0,
+  preferredDate: "",
   preferredTimeText: "",
   remoteUrl: "",
   remoteToken: "",
   pollInterval: 2000,
+  tabPreferences: {},
 };
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -54,6 +55,17 @@ chrome.runtime.onStartup.addListener(() => {
   chrome.alarms.create("schedule-check", { periodInMinutes: 0.25 });
   chrome.storage.local.get("customDomains", ({ customDomains = [] }) => {
     registerCustomDomains(customDomains);
+  });
+});
+
+// ── 清理已关闭标签页的独立偏好 ───────────────────────────────────
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  chrome.storage.local.get("tabPreferences", ({ tabPreferences = {} }) => {
+    if (tabPreferences[tabId]) {
+      delete tabPreferences[tabId];
+      chrome.storage.local.set({ tabPreferences });
+    }
   });
 });
 
@@ -301,12 +313,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "GET_CONFIG") {
-    chrome.storage.local.get(null, (cfg) => sendResponse(cfg));
+    chrome.storage.local.get(null, (cfg) => {
+      // 合并当前标签页的独立偏好
+      const tabId = sender?.tab?.id;
+      if (tabId && cfg.tabPreferences && cfg.tabPreferences[tabId]) {
+        const tp = cfg.tabPreferences[tabId];
+        if (tp.preferredWarehouse != null) cfg.preferredWarehouse = tp.preferredWarehouse;
+        if (tp.preferredDate != null) cfg.preferredDate = tp.preferredDate;
+        if (tp.preferredTimeText != null) cfg.preferredTimeText = tp.preferredTimeText;
+      }
+      sendResponse(cfg);
+    });
     return true;
   }
 
   if (msg.type === "LOG") {
-    addLog(msg.entry.level, msg.entry.message, msg.entry);
+    const tabId = sender?.tab?.id || null;
+    addLog(msg.entry.level, msg.entry.message, { ...msg.entry, tabId });
   }
 
   if (msg.type === "GET_SCHEDULE_STATUS") {
@@ -445,7 +468,7 @@ function addLog(level, message, extra) {
   const entry = { ts: Date.now(), level, message, ...(extra || {}) };
   chrome.storage.local.get("logs", ({ logs = [] }) => {
     logs.push(entry);
-    if (logs.length > 300) logs = logs.slice(-300);
+    if (logs.length > 500) logs = logs.slice(-500);
     chrome.storage.local.set({ logs });
   });
   sendRemote("/api/log", entry);
