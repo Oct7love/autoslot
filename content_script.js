@@ -524,68 +524,89 @@
   function tryClickAvailableDate() {
     const preferredDay = parseInt(cfg.preferredDate, 10) || 0;
 
-    // 日历区域内可点击的日期元素
-    const selectors = [
-      '[class*="calendar"] [role="button"]',
-      '[class*="calendar"] button',
-      '[class*="calendar"] td',
-      '[class*="calendar"] [class*="cell"]',
-      '[class*="calendar"] [class*="day"]',
-      '[class*="date"] [role="button"]',
-      '[class*="picker"] [role="button"]',
-      '[class*="picker"] td',
-      '.ant-picker-cell',
-      '.ant-picker-cell-inner',
-      '[role="gridcell"]',
-      '[role="button"]',
-      'button',
-    ];
-    const all = document.querySelectorAll(selectors.join(","));
+    // 广泛扫描页面上所有可能是日期的元素
+    const all = document.querySelectorAll("*");
     const candidates = [];
 
     for (const el of all) {
+      if (el.children.length > 5) continue; // 跳过大容器
       if (el.closest("#ss-toast, #ss-slot-label, #ss-safety-banner, #ss-autoclick-overlay")) continue;
-      const t = (el.textContent || "").trim();
-      // 只匹配 1-31 的纯数字日期
-      if (!/^\d{1,2}$/.test(t)) continue;
-      const num = parseInt(t, 10);
-      if (num < 1 || num > 31) continue;
 
       const rect = el.getBoundingClientRect();
-      if (rect.width < 10 || rect.height < 10) continue;
+      if (rect.width < 10 || rect.height < 10 || rect.width > 200 || rect.height > 200) continue;
+
       const style = getComputedStyle(el);
       if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") continue;
 
-      // 跳过明显禁用/灰色的日期
+      // 获取元素自身文本（排除子元素干扰）
+      const ownText = Array.from(el.childNodes)
+        .filter(n => n.nodeType === Node.TEXT_NODE)
+        .map(n => n.textContent.trim())
+        .join("").trim();
+      const fullText = (el.textContent || "").trim();
+
+      // 从自身文本或完整文本中提取日期数字
+      let num = 0;
+      if (/^\d{1,2}$/.test(ownText)) {
+        num = parseInt(ownText, 10);
+      } else if (/^\d{1,2}$/.test(fullText)) {
+        num = parseInt(fullText, 10);
+      } else {
+        // 文本以数字开头（如 "21\nFeb"、"21 available"）
+        const m = fullText.match(/^(\d{1,2})\b/);
+        if (m) num = parseInt(m[1], 10);
+      }
+      if (num < 1 || num > 31) continue;
+
+      // 跳过禁用元素
       const isDisabled = el.hasAttribute("disabled") ||
         el.getAttribute("aria-disabled") === "true" ||
-        /disabled|grey|gray/i.test(el.className) ||
+        /disabled/i.test(el.className) ||
+        style.pointerEvents === "none" ||
         parseFloat(style.opacity) < 0.4;
       if (isDisabled) continue;
 
-      let score = 100;
-      // 首选日期加分
+      let score = 0;
+      // 首选日期最高分
       if (preferredDay && num === preferredDay) score += 500;
-      // 已高亮/选中的日期（蓝色圆圈）加分
+      // 有背景色（蓝色圆圈等可用标记）
       const bg = style.backgroundColor || "";
+      if (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") score += 200;
+      // class 包含选中/可用关键词
       const cls = (el.className || "") + " " + (el.parentElement?.className || "");
-      if (/selected|active|current|today|primary|available/i.test(cls)) score += 200;
-      if (bg && bg !== "rgb(255, 255, 255)" && bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") score += 150;
-      // 在日历容器内加分
-      if (el.closest('[class*="calendar"], [class*="picker"], [class*="date"]')) score += 100;
+      if (/selected|active|current|today|primary|available|highlight/i.test(cls)) score += 200;
+      // 在日历容器内
+      if (el.closest('[class*="calendar"], [class*="picker"], [class*="date"], [class*="schedule"]')) score += 150;
+      // role=button/gridcell 加分
+      const role = el.getAttribute("role") || "";
+      if (/button|gridcell/i.test(role)) score += 100;
+      // 元素是 button/a/td
+      if (/^(button|a|td)$/i.test(el.tagName)) score += 80;
+      // 可点击的指针样式
+      if (style.cursor === "pointer") score += 100;
+      // 纯数字文本（没有干扰内容）
+      if (/^\d{1,2}$/.test(fullText)) score += 50;
 
-      candidates.push({ el, num, score, text: t });
+      // 最低分要求：至少要有一些日期特征
+      if (score < 100) continue;
+
+      candidates.push({ el, num, score });
     }
 
-    if (!candidates.length) return false;
+    if (!candidates.length) {
+      log("warn", "tryClickAvailableDate: 未找到任何可点击日期");
+      return false;
+    }
 
-    // 去重：同一个数字只保留得分最高的
+    // 去重：同一数字只保留最高分
     const byNum = {};
     for (const c of candidates) {
       if (!byNum[c.num] || c.score > byNum[c.num].score) byNum[c.num] = c;
     }
     const sorted = Object.values(byNum).sort((a, b) => b.score - a.score);
     const best = sorted[0];
+
+    log("info", `日期候选: ${sorted.map(c => c.num + "号(" + c.score + "分)").join(", ")}`);
 
     best.el.scrollIntoView({ behavior: "instant", block: "center" });
     best.el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
