@@ -68,6 +68,7 @@
     }
     .le { padding: 2px 0; border-bottom: 1px solid #0a0a10; }
     .le .ts { color: #555; margin-right: 8px; }
+    .le .src { color: #4a6a8a; margin-right: 8px; }
     .le .lv {
       display: inline-block; width: 36px; text-align: center; border-radius: 3px;
       font-size: 10px; padding: 1px 4px; margin-right: 6px;
@@ -278,15 +279,17 @@ function appendLog(entry, notify) {
   const hl = HL_RE.test(entry.message || "");
   const cid = getLogClientId(entry);
   div.className = "le " + lv + (hl ? " hl" : "");
+   if (!cid) div.classList.add("global");
   if (cid) div.dataset.client = cid;
 
   // 选中某实例时，不匹配的日志隐藏
-  if (selectedClientId && cid && cid !== selectedClientId) div.classList.add("hidden");
+  if (selectedClientId && cid !== selectedClientId) div.classList.add("hidden");
 
   const ts = entry.ts
     ? new Date(entry.ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
     : "--:--:--";
-  div.innerHTML = `<span class="ts">[${ts}]</span><span class="lv">${lv}</span><span class="msg">${esc(entry.message || "")}</span>`;
+  const src = cid ? ("#" + cid) : "global";
+  div.innerHTML = `<span class="ts">[${ts}]</span><span class="src">[${src}]</span><span class="lv">${lv}</span><span class="msg">${esc(entry.message || "")}</span>`;
   ls.appendChild(div);
 
   while (ls.children.length > 600) ls.removeChild(ls.firstChild);
@@ -388,7 +391,7 @@ function filterLogs() {
   const entries = ls.querySelectorAll(".le");
   for (const el of entries) {
     const cid = el.dataset.client;
-    if (!selectedClientId || !cid || cid === selectedClientId) {
+    if (!selectedClientId || cid === selectedClientId) {
       el.classList.remove("hidden");
     } else {
       el.classList.add("hidden");

@@ -10,13 +10,19 @@
   if (window.__SS_CONTENT_INJECTED__) return;
   window.__SS_CONTENT_INJECTED__ = true;
 
+  // URL 安全检查：仅在 FBN 调度页面运行
+  const _ssHost = location.hostname;
+  if (_ssHost !== "fbn.noon.partners" && !_ssHost.endsWith(".noon.com")) {
+    return;
+  }
+
   // ── State ────────────────────────────────────────────────────────
 
   const _ssNonce = Array.from(crypto.getRandomValues(new Uint8Array(16)),
     b => b.toString(16).padStart(2, "0")).join("");
 
   let cfg = {};
-  let armed = true;
+  let armed = false;
   let highlightOn = true;
   let autoClickEnabled = false;
   let autoRefreshEnabled = false;

@@ -4,12 +4,12 @@
    ───────────────────────────────────────────── */
 
 const BUILT_IN_DOMAINS = [
-  "https://*.noon.partners/*",
+  "https://fbn.noon.partners/*",
   "https://*.noon.com/*",
 ];
 
 const DEFAULTS = {
-  armed: true,
+  armed: false,
   soundEnabled: false,
   desktopNotif: false,
   titleFlash: true,
@@ -67,6 +67,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       chrome.storage.local.set({ tabPreferences });
     }
   });
+  sendRemote("/api/client/remove", { clientId: String(tabId) });
 });
 
 // ── 动态注册自定义域名的内容脚本 ─────────────────────────────────
@@ -132,6 +133,11 @@ function getAllUrlPatterns(customDomains) {
     if (p) patterns.push(p);
   }
   return patterns;
+}
+
+function isScheduleTabUrl(url) {
+  if (!url) return false;
+  return /\/schedule(\/|$)/i.test(url) || /inbound-scheduler/i.test(url);
 }
 
 // ── 定时调度检查（每15秒）────────────────────────────────────────
@@ -328,8 +334,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "LOG") {
-    const tabId = sender?.tab?.id || null;
-    addLog(msg.entry.level, msg.entry.message, { ...msg.entry, tabId });
+    const tabId = sender?.tab?.id ?? null;
+    const tabUrl = sender?.tab?.url || "";
+    // 仅记录调度页面日志，避免其它 Noon 页面日志污染远程监控
+    if (tabId != null && !isScheduleTabUrl(tabUrl)) return;
+    addLog(msg.entry.level, msg.entry.message, { ...msg.entry, tabId, tabUrl });
   }
 
   if (msg.type === "GET_SCHEDULE_STATUS") {
@@ -354,17 +363,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "INJECT_CURRENT_TAB") {
     if (msg.tabId) {
-      chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["injected.js"], world: "MAIN" }).catch(() => {});
-      chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["content_script.js"] }).catch(() => {});
-      chrome.scripting.insertCSS({ target: { tabId: msg.tabId }, files: ["styles.css"] }).catch(() => {});
+      chrome.tabs.get(msg.tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab?.url || !isScheduleTabUrl(tab.url)) return;
+        chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["injected.js"], world: "MAIN" }).catch(() => {});
+        chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["content_script.js"] }).catch(() => {});
+        chrome.scripting.insertCSS({ target: { tabId: msg.tabId }, files: ["styles.css"] }).catch(() => {});
+      });
     }
   }
 
   if (msg.type === "STATE_UPDATE") {
+    const tabId = sender?.tab?.id;
+    const tabUrl = sender?.tab?.url || "";
+    if (tabId == null || !isScheduleTabUrl(tabUrl)) return;
     sendRemote("/api/state", {
       ...msg,
-      clientId: String(sender?.tab?.id || "unknown"),
-      tabUrl: sender?.tab?.url || "",
+      clientId: String(tabId),
+      tabUrl,
     });
   }
 });

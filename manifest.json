@@ -24,7 +24,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.noon.partners/*",
+        "https://fbn.noon.partners/*",
         "https://*.noon.com/*"
       ],
       "js": ["injected.js"],
@@ -33,7 +33,7 @@
     },
     {
       "matches": [
-        "https://*.noon.partners/*",
+        "https://fbn.noon.partners/*",
         "https://*.noon.com/*"
       ],
       "js": ["content_script.js"],

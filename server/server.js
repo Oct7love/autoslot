@@ -13,8 +13,10 @@ const PORT = parseInt(process.env.PORT || "9800", 10);
 const TOKEN = process.env.SS_TOKEN || crypto.randomBytes(12).toString("hex");
 
 const MAX_LOGS = 500;
+const MAX_BODY_BYTES = 512 * 1024;
 let logs = [];
 let states = {};
+const mutedClients = new Set();
 const sseClients = new Set();
 
 // ── 工具函数 ────────────────────────────────────────────────────────
@@ -22,13 +24,32 @@ const sseClients = new Set();
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (c) => chunks.push(c));
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (c) => {
+      if (tooLarge) return;
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        tooLarge = true;
+        reject(new Error("Payload too large"));
+        try { req.destroy(); } catch (_) {}
+        return;
+      }
+      chunks.push(c);
+    });
     req.on("end", () => {
+      if (tooLarge) return;
       try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf-8"))); }
       catch (e) { reject(e); }
     });
     req.on("error", reject);
   });
+}
+
+function getClientIdFromPayload(data) {
+  if (data?.tabId != null) return String(data.tabId);
+  if (data?.clientId != null) return String(data.clientId);
+  return null;
 }
 
 function broadcast(event, data) {
@@ -93,6 +114,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/log") {
     try {
       const data = await parseBody(req);
+      const cid = getClientIdFromPayload(data);
+      if (cid && mutedClients.has(cid)) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end('{"ok":true,"muted":true}');
+        return;
+      }
       const entry = { ...data, serverTs: Date.now() };
       logs.push(entry);
       if (logs.length > MAX_LOGS) logs = logs.slice(-MAX_LOGS);
@@ -107,7 +134,12 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/state") {
     try {
       const data = await parseBody(req);
-      const id = data.clientId || "default";
+      const id = String(data.clientId || "default");
+      if (mutedClients.has(id)) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end('{"ok":true,"muted":true}');
+        return;
+      }
       states[id] = { ...data, serverTs: Date.now() };
       // 清理超过 60 秒没更新的实例
       const now = Date.now();
@@ -125,20 +157,24 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && url.pathname === "/api/client/remove") {
     try {
       const data = await parseBody(req);
-      const id = data.clientId;
-      if (id && states[id]) {
-        delete states[id];
-        logs = logs.filter((e) => {
-          const cid = e.tabId != null ? String(e.tabId) : (e.clientId || null);
-          return cid !== id;
-        });
-        broadcast("client_removed", { clientId: id });
-        res.writeHead(200, { "Content-Type": "application/json" });
-        res.end('{"ok":true}');
-      } else {
-        res.writeHead(404, { "Content-Type": "application/json" });
-        res.end('{"error":"not found"}');
+      const id = data.clientId != null ? String(data.clientId) : "";
+      if (!id) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end('{"error":"clientId required"}');
+        return;
       }
+
+      // 删除后加入静默列表，避免仍在线标签页继续上报导致“删了又回来”
+      mutedClients.add(id);
+      const existed = !!states[id];
+      delete states[id];
+      logs = logs.filter((e) => {
+        const cid = e.tabId != null ? String(e.tabId) : (e.clientId != null ? String(e.clientId) : null);
+        return cid !== id;
+      });
+      broadcast("client_removed", { clientId: id });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, existed }));
     } catch (_) { res.writeHead(400); res.end("Bad Request"); }
     return;
   }

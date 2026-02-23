@@ -11,6 +11,12 @@
   if (window.__SS_INJECTED__) return;
   window.__SS_INJECTED__ = true;
 
+  // URL 安全检查：仅在 FBN 调度页面运行
+  const _ssHost = location.hostname;
+  if (_ssHost !== "fbn.noon.partners" && !_ssHost.endsWith(".noon.com")) {
+    return;
+  }
+
   const CAPACITY_RE = /\/inbound-scheduler\/.*\/capacity/i;
   const BOOKING_RE = /\/inbound-scheduler\/.*(book|confirm|reserve|schedule|slot)/i;
   const SLOT_URL_RE = /slot|schedule|shipment|booking|availability|inbound|delivery/i;
@@ -86,10 +92,10 @@
         recoveryDelay = Math.min(Math.round(recoveryDelay * 1.5), 180000);
         lastRecoveryTime = 0;
       }
-      if (consecutive429 >= 3) {
-        if (backoffLevel < 4) {
+      if (consecutive429 >= 2) {
+        if (backoffLevel < 5) {
           backoffLevel++;
-          const newInterval = Math.min(baseInterval * Math.pow(2, backoffLevel), 30000);
+          const newInterval = Math.min(Math.round(baseInterval * Math.pow(1.5, backoffLevel)), baseInterval * 5);
           if (newInterval !== interval) {
             interval = newInterval;
             if (timer) startTimer();
@@ -104,9 +110,9 @@
     function checkRecovery() {
       consecutiveOk++;
       consecutive429 = 0;
-      if (backoffLevel > 0 && consecutiveOk >= 10) {
+      if (backoffLevel > 0 && consecutiveOk >= 20) {
         backoffLevel = Math.max(0, backoffLevel - 1);
-        const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+        const newInterval = backoffLevel === 0 ? baseInterval : Math.round(baseInterval * Math.pow(1.5, backoffLevel));
         if (newInterval !== interval) {
           interval = newInterval;
           if (timer) startTimer();
@@ -129,7 +135,7 @@
           consecutive429 = 0;
           consecutiveOk = 0;
           backoffLevel = Math.max(0, backoffLevel - 1);
-          const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+          const newInterval = backoffLevel === 0 ? baseInterval : Math.round(baseInterval * Math.pow(1.5, backoffLevel));
           if (newInterval !== interval) {
             interval = newInterval;
             if (timer) startTimer();
@@ -277,6 +283,7 @@
   let backoffLevel = 0;      // 退避等级：0=正常, 1=2x, 2=4x, 3=8x
   let consecutive429 = 0;    // 连续 429 计数
   let consecutiveOk = 0;     // 连续成功计数
+  let consecutiveNetErrors = 0; // 连续网络错误计数
 
   function startPoll(ms) {
     stopPoll();
@@ -285,7 +292,7 @@
       pollWorker.postMessage({ type: "START", interval: ms });
     } else {
       baseInterval = ms; currentInterval = ms; backoffLevel = 0;
-      consecutive429 = 0; consecutiveOk = 0;
+      consecutive429 = 0; consecutiveOk = 0; consecutiveNetErrors = 0;
       pollTimer = setInterval(pollCapacity, ms);
     }
   }
@@ -311,9 +318,9 @@
   function applyBackoff() {
     consecutive429++;
     consecutiveOk = 0;
-    if (consecutive429 >= 3 && backoffLevel < 4) {
+    if (consecutive429 >= 2 && backoffLevel < 5) {
       backoffLevel++;
-      const newInterval = Math.min(baseInterval * Math.pow(2, backoffLevel), 30000);
+      const newInterval = Math.min(Math.round(baseInterval * Math.pow(1.5, backoffLevel)), baseInterval * 5);
       if (newInterval !== currentInterval) {
         currentInterval = newInterval;
         stopPoll();
@@ -332,9 +339,9 @@
   function checkRecovery() {
     consecutiveOk++;
     consecutive429 = 0;
-    if (backoffLevel > 0 && consecutiveOk >= 10) {
+    if (backoffLevel > 0 && consecutiveOk >= 20) {
       backoffLevel = Math.max(0, backoffLevel - 1);
-      const newInterval = backoffLevel === 0 ? baseInterval : baseInterval * Math.pow(2, backoffLevel);
+      const newInterval = backoffLevel === 0 ? baseInterval : Math.round(baseInterval * Math.pow(1.5, backoffLevel));
       if (newInterval !== currentInterval) {
         currentInterval = newInterval;
         stopPoll();
@@ -359,7 +366,9 @@
         headers: lastCapacityReq.headers || { "Content-Type": "application/json" },
         body: lastCapacityReq.body,
         credentials: "include",
+        cache: "no-store",
       });
+      consecutiveNetErrors = 0;
       if (resp.status === 429) {
         if (pollWorker && !useWorkerFallback) {
           pollWorker.postMessage({ type: "BACKOFF" });
@@ -381,6 +390,12 @@
       const data = await resp.json();
       analyzeResponse(lastCapacityReq.url, data);
     } catch (err) {
+      consecutiveNetErrors++;
+      if (consecutiveNetErrors >= 5) {
+        ssSend({ type: "SS_POLL_BACKOFF", level: -1, interval: 0, reason: "连续网络错误，暂停轮询 30s" });
+        pausePollFor(30000);
+        consecutiveNetErrors = 0;
+      }
       ssSend({ type: "SS_POLL_ERROR", tick: pollTickCount, error: err.message || String(err) });
     }
   }
