@@ -1,14 +1,15 @@
 /* ─────────────────────────────────────────────
-   Slot Sentinel – Injected Styles (v2 FBN)
+   AutoSlot – Injected Page Styles
+   Apple Design Language / Dark
    ───────────────────────────────────────────── */
 
-/* ── 高亮发光 ───────────────────────────────── */
+/* ── Highlight ────────────────────────────── */
 
 .ss-highlight {
-  outline: 3px solid #00e676 !important;
+  outline: 3px solid #30d158 !important;
   box-shadow:
-    0 0 12px 4px rgba(0, 230, 118, 0.6),
-    0 0 30px 8px rgba(0, 230, 118, 0.25) !important;
+    0 0 10px 3px rgba(48, 209, 88, 0.45),
+    0 0 24px 6px rgba(48, 209, 88, 0.15) !important;
   animation: ss-pulse 0.7s ease-in-out 3 !important;
   position: relative;
   z-index: 2147483640 !important;
@@ -17,34 +18,35 @@
 @keyframes ss-pulse {
   0%, 100% {
     box-shadow:
-      0 0 12px 4px rgba(0, 230, 118, 0.6),
-      0 0 30px 8px rgba(0, 230, 118, 0.25);
+      0 0 10px 3px rgba(48, 209, 88, 0.45),
+      0 0 24px 6px rgba(48, 209, 88, 0.15);
   }
   50% {
     box-shadow:
-      0 0 24px 10px rgba(0, 230, 118, 0.9),
-      0 0 60px 20px rgba(0, 230, 118, 0.4);
+      0 0 20px 8px rgba(48, 209, 88, 0.7),
+      0 0 48px 16px rgba(48, 209, 88, 0.25);
   }
 }
 
-/* ── 浮动标签 "有位了!" ──────────────────────── */
+/* ── Floating Label ───────────────────────── */
 
 #ss-slot-label {
   position: absolute;
   z-index: 2147483647;
-  background: #00e676;
-  color: #1b1b1b;
-  font-family: system-ui, -apple-system, sans-serif;
+  background: #30d158;
+  color: #fff;
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
   font-size: 14px;
-  font-weight: 800;
-  padding: 4px 12px;
-  border-radius: 5px;
+  font-weight: 600;
+  padding: 5px 14px;
+  border-radius: 8px;
   pointer-events: none;
   opacity: 0;
-  transform: translateY(8px);
-  transition: opacity 0.2s, transform 0.2s;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease-out, transform 0.2s ease-out;
   white-space: nowrap;
-  box-shadow: 0 2px 12px rgba(0, 230, 118, 0.4);
+  box-shadow: 0 2px 8px rgba(48, 209, 88, 0.3);
+  letter-spacing: -0.1px;
 }
 
 #ss-slot-label.ss-slot-label-visible {
@@ -52,25 +54,29 @@
   transform: translateY(0);
 }
 
-/* ── Toast 提示 ─────────────────────────────── */
+/* ── Toast ────────────────────────────────── */
 
 #ss-toast {
   position: fixed;
   bottom: 24px;
   right: 24px;
   z-index: 2147483647;
-  background: linear-gradient(135deg, #1b5e20, #2e7d32);
-  color: #fff;
-  font-family: system-ui, -apple-system, sans-serif;
+  background: rgba(44, 44, 46, 0.78);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  color: #30d158;
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
   font-size: 14px;
-  font-weight: 700;
+  font-weight: 600;
   padding: 14px 22px;
-  border-radius: 10px;
-  box-shadow: 0 6px 30px rgba(0,0,0,0.4);
+  border-radius: 14px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  border: 0.5px solid rgba(255, 255, 255, 0.06);
   pointer-events: none;
   opacity: 0;
-  transform: translateY(16px) scale(0.94);
-  transition: opacity 0.25s, transform 0.25s;
+  transform: translateY(12px) scale(0.96);
+  transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+  letter-spacing: -0.1px;
 }
 
 #ss-toast.ss-toast-visible {
@@ -78,16 +84,16 @@
   transform: translateY(0) scale(1);
 }
 
-/* ── 屏幕闪烁 ──────────────────────────────── */
+/* ── Screen Flash ─────────────────────────── */
 
 .ss-screen-flash::after {
   content: "";
   position: fixed;
   inset: 0;
   z-index: 2147483645;
-  background: rgba(0, 230, 118, 0.1);
+  background: rgba(48, 209, 88, 0.05);
   pointer-events: none;
-  animation: ss-flash 0.4s ease-out forwards;
+  animation: ss-flash 0.35s ease-out forwards;
 }
 
 @keyframes ss-flash {
@@ -95,21 +101,22 @@
   100% { opacity: 0; }
 }
 
-/* ── 安全警告横幅 ──────────────────────────── */
+/* ── Safety Banner ────────────────────────── */
 
 #ss-safety-banner {
   position: fixed;
   top: 0; left: 0; right: 0;
   z-index: 2147483647;
-  background: linear-gradient(135deg, #c62828, #d32f2f);
+  background: #ff453a;
   color: #fff;
-  padding: 12px 16px;
+  padding: 14px 20px;
   font-size: 14px;
   font-weight: 600;
   text-align: center;
-  font-family: system-ui, sans-serif;
-  animation: ss-slide-down 0.3s ease-out;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  animation: ss-slide-down 0.25s ease-out;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+  letter-spacing: -0.1px;
 }
 
 @keyframes ss-slide-down {
@@ -117,13 +124,15 @@
   to   { transform: translateY(0); }
 }
 
-/* ── 自动点击倒计时覆盖层 ──────────────────── */
+/* ── Auto-click Overlay ───────────────────── */
 
 #ss-autoclick-overlay {
   position: fixed;
   inset: 0;
   z-index: 2147483646;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -137,61 +146,69 @@
 }
 
 .ss-ac-content {
-  background: linear-gradient(135deg, #1a1a2e, #16213e);
-  border: 2px solid #00e676;
-  border-radius: 16px;
-  padding: 30px 40px;
+  background: rgba(36, 36, 38, 0.88);
+  backdrop-filter: blur(24px) saturate(1.4);
+  -webkit-backdrop-filter: blur(24px) saturate(1.4);
+  border: 0.5px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 32px 44px;
   text-align: center;
-  box-shadow: 0 0 40px rgba(0, 230, 118, 0.3);
-  font-family: system-ui, -apple-system, sans-serif;
-  animation: ss-scale-in 0.2s ease-out;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+  font-family: -apple-system, 'SF Pro Display', system-ui, sans-serif;
+  animation: ss-scale-in 0.25s ease-out;
 }
 
 @keyframes ss-scale-in {
-  from { transform: scale(0.8); opacity: 0; }
+  from { transform: scale(0.9); opacity: 0; }
   to   { transform: scale(1); opacity: 1; }
 }
 
 .ss-ac-icon {
-  font-size: 48px;
+  font-size: 44px;
   margin-bottom: 8px;
   animation: ss-pulse-icon 0.6s ease-in-out infinite;
 }
 
 @keyframes ss-pulse-icon {
   0%, 100% { transform: scale(1); }
-  50%      { transform: scale(1.15); }
+  50%      { transform: scale(1.12); }
 }
 
 .ss-ac-text {
-  color: #00e676;
-  font-size: 20px;
-  font-weight: 700;
+  color: #30d158;
+  font-size: 18px;
+  font-weight: 600;
   margin-bottom: 6px;
+  letter-spacing: -0.3px;
 }
 
 .ss-ac-countdown {
   color: #fff;
   font-size: 32px;
-  font-weight: 800;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
+  letter-spacing: -0.5px;
 }
 
 .ss-ac-cancel {
-  background: transparent;
-  border: 1px solid #ef535088;
-  color: #ef5350;
-  padding: 8px 24px;
-  border-radius: 6px;
-  font-size: 13px;
+  background: rgba(118, 118, 128, 0.12);
+  border: none;
+  color: #ff453a;
+  padding: 10px 28px;
+  border-radius: 8px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s;
-  font-family: system-ui, sans-serif;
+  transition: all 0.15s ease-out;
+  font-family: -apple-system, 'SF Pro Text', system-ui, sans-serif;
+  letter-spacing: -0.1px;
 }
 
 .ss-ac-cancel:hover {
-  background: #ef535022;
-  border-color: #ef5350;
+  background: rgba(255, 69, 58, 0.12);
+}
+
+.ss-ac-cancel:active {
+  transform: scale(0.96);
 }

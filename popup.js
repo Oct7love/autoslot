@@ -79,10 +79,16 @@ let logFilterTab = true;
 
 // ── Load config ────────────────────────────────────────────────────
 
+let isTargetPage = false;
+
 chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
   currentTabId = tabs[0]?.id || null;
+  const tabUrl = tabs[0]?.url || "";
 
   chrome.storage.local.get(null, (cfg) => {
+    const customDomains = cfg.customDomains || [];
+    isTargetPage = /noon\.partners|noon\.com/i.test(tabUrl) ||
+      customDomains.some(d => tabUrl.includes(d));
     togAutoClick.checked      = !!cfg.autoClick;
     togAutoClickChain.checked = !!cfg.autoClickChain;
     autoClickDelay.value      = cfg.autoClickDelay || 500;
@@ -140,15 +146,19 @@ chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     if (remoteUrl) remoteUrl.value     = (cfg.remoteUrl || "").trim();
     if (remoteToken) remoteToken.value = (cfg.remoteToken || "").trim();
 
-    updateArmUI(cfg.armed !== false);
+    const showArmed = isTargetPage ? cfg.armed === true : false;
+    updateArmUI(showArmed);
+    if (!isTargetPage) {
+      statusText.textContent = "非目标页面";
+      statusDot.className = "status-dot unknown";
+    }
     renderSchedules(cfg.schedules || []);
     renderDomains(cfg.customDomains || []);
     renderLogs(cfg.logs || []);
     updateScheduleStatusUI();
     initMultiWindowsSection();
+    if (isTargetPage) requestState();
   });
-
-  requestState();
 });
 
 // ══════════════════════════════════════════════════════════════════
@@ -647,7 +657,7 @@ btnClearLogs.addEventListener("click", () => {
 btnLogFilter.addEventListener("click", () => {
   logFilterTab = !logFilterTab;
   btnLogFilter.textContent = logFilterTab ? "仅当前" : "全部";
-  btnLogFilter.style.color = logFilterTab ? "#4db6ac" : "#888";
+  btnLogFilter.classList.toggle("show-all", !logFilterTab);
   chrome.storage.local.get("logs", ({ logs = [] }) => renderLogs(logs));
 });
 
@@ -822,13 +832,13 @@ function initMultiWindowsSection() {
   section.className = "section";
   section.innerHTML = `
     <div class="section-title">抢占窗口</div>
-    <div style="display:flex;align-items:center;gap:6px;padding:6px 0;flex-wrap:wrap">
-      <label style="font-size:12px;color:#ccc">打开</label>
-      <input type="number" id="multiWindowCount" min="2" max="10" value="5" style="width:48px;background:#1a1a25;border:1px solid #333;border-radius:4px;color:#ccc;padding:4px 6px;font-size:12px;text-align:center">
-      <span style="font-size:12px;color:#ccc">个监控窗口</span>
-      <button type="button" id="btnOpenMultiWindows" style="margin-left:4px;padding:6px 12px;border-radius:6px;background:linear-gradient(135deg,#1b5e20,#2e7d32);color:#fff;border:none;font-size:12px;font-weight:600;cursor:pointer">打开</button>
+    <div style="display:flex;align-items:center;gap:8px;padding:8px 0;flex-wrap:wrap">
+      <label style="font-size:12px;color:var(--text-secondary)">打开</label>
+      <input type="number" id="multiWindowCount" min="2" max="10" value="5" style="width:48px;background:var(--bg-well);border:1px solid var(--border-color);border-radius:var(--radius-sm);color:var(--text-primary);padding:4px 6px;font-size:12px;text-align:center">
+      <span style="font-size:12px;color:var(--text-secondary)">个监控窗口</span>
+      <button type="button" id="btnOpenMultiWindows" style="margin-left:4px;padding:6px 12px;border-radius:var(--radius-md);background:var(--accent-bg);color:var(--accent);border:none;font-size:12px;font-weight:600;cursor:pointer">打开</button>
     </div>
-    <div style="font-size:10px;color:#555;margin-top:4px;line-height:1.4">每个标签页独立监测，可同时抢多个 slot（建议 4～5 个）</div>
+    <div style="font-size:10px;color:var(--text-tertiary);margin-top:4px;line-height:1.4">每个标签页独立监测，可同时抢多个 slot（建议 4～5 个）</div>
   `;
 
   const actions = document.querySelector(".actions");

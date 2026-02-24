@@ -315,7 +315,7 @@
     chrome.runtime.sendMessage({ type: "GET_CONFIG" }, (response) => {
       if (chrome.runtime.lastError) return;
       cfg = response || {};
-      armed = cfg.armed !== false;
+      armed = cfg.armed === true;
       highlightOn = cfg.highlightOn !== false;
       autoClickEnabled = !!cfg.autoClick;
       autoRefreshEnabled = !!cfg.autoRefresh;
@@ -589,10 +589,9 @@
   /** 重选仓库后：走完整的 日期→时段→确认 流程 */
   function afterWarehouseReselect() {
     if (!armed || !autoClickEnabled) { finishGrab(); return; }
-    log("info", "✅ 仓库重选完成，开始点击日期…");
+    log("info", "✅ 仓库重选完成，开始检测日期…");
     currentState = "AVAILABLE";
     lastTransition = Date.now();
-    // 重选已强制页面重新渲染，现在走 日期→时段→确认
     waitForDateClick(0);
   }
 
@@ -1245,24 +1244,11 @@
         log("info", "步骤1: 跳过日期点击（时段卡片已在页面）");
         setTimeout(() => waitForTimeSlots(0), 0);
       } else if (fromApi) {
-        // API 轮询触发 → 页面 DOM 未刷新，先快速检查是否碰巧已有日期
-        const dateNow = tryClickAvailableDate();
-        if (dateNow === "clicked") {
-          log("info", "✅ 步骤1: API 触发，页面恰好已有日期，直接点击！");
-          setTimeout(() => waitForTimeSlots(0), 1000);
-        } else if (dateNow === "filtered") {
-          // 页面有日期但不匹配偏好 → 放弃抢位，短冷却后继续轮询等 slot 变化
-          log("info", "步骤1: 页面日期不匹配偏好，等待此 slot 被他人抢走…（5s 后重新检查）");
-          cooldownUntil = Date.now() + 5000; // 5s 后再看 slot 是否变化
-          finishGrab();
-          hideAutoClickOverlay();
-        } else {
-          // 页面无日期 → 立即重选仓库强制前端渲染
-          log("info", "步骤1: API 触发，页面无日期 → 立即重选仓库强制渲染！");
-          dateClickReselected = true;
-          triggerWarehouseReselect();
-          // → afterWarehouseReselect() → waitForDateClick(0)
-        }
+        // API 触发 → 页面 DOM 尚未更新，直接重选仓库强制 React 重新请求并渲染
+        log("info", "步骤1: API 触发 → 重选仓库强制前端刷新数据…");
+        dateClickReselected = true;
+        triggerWarehouseReselect();
+        // → afterWarehouseReselect() → 等待日期渲染 → waitForDateClick(0)
       } else {
         // DOM 触发（页面刷新/用户操作）→ 日期可能已在页面，正常重试流程
         waitForDateClick(0);
