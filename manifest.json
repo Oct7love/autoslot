@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Slot Sentinel",
+  "name": "AutoSlot",
   "version": "2.3.0",
   "description": "Noon FBN 仓库 slot 自动抢位。支持自定义网址、定时调度、自动点击、自动刷新、邮件通知。",
   "permissions": [

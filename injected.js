@@ -188,13 +188,19 @@
         case "OK":
           checkRecovery();
           break;
-        case "SET_INTERVAL":
+        case "SET_INTERVAL": {
           baseInterval = msg.interval || 500;
-          if (backoffLevel === 0) {
-            interval = baseInterval;
+          // 退避状态下也要基于新 baseInterval 重算，确保协调间隔生效
+          const ci = backoffLevel === 0
+            ? baseInterval
+            : Math.min(Math.round(baseInterval * Math.pow(1.5, backoffLevel)), baseInterval * 5);
+          if (ci !== interval) {
+            interval = ci;
             if (timer) startTimer();
+            postMessage({ type: "BACKOFF_CHANGED", level: backoffLevel, interval, source: "coordinated" });
           }
           break;
+        }
       }
     };
   `;
@@ -508,6 +514,29 @@
           pollWorker.postMessage({ type: "RESUME" });
         } else if (!pollTimer) {
           startPoll(pollInterval);
+        }
+      }
+    }
+
+    // ── 跨标签页协调：service worker 通知调整轮询间隔 ─────────────
+    if (e.data.type === "SS_ADJUST_POLL") {
+      if (e.data._ssNonce && e.data._ssNonce !== _ssNonce) return;
+      const ms = e.data.interval || 0;
+      if (ms > 0) {
+        pollInterval = ms;
+        if (pollWorker && !useWorkerFallback) {
+          pollWorker.postMessage({ type: "SET_INTERVAL", interval: ms });
+        } else if (pollTimer) {
+          // fallback 模式：保留退避等级，只更新基础间隔
+          baseInterval = ms;
+          const newInt = backoffLevel === 0
+            ? baseInterval
+            : Math.min(Math.round(baseInterval * Math.pow(1.5, backoffLevel)), baseInterval * 5);
+          if (newInt !== currentInterval) {
+            currentInterval = newInt;
+            clearInterval(pollTimer);
+            pollTimer = setInterval(pollCapacity, currentInterval);
+          }
         }
       }
     }

@@ -68,7 +68,33 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     }
   });
   sendRemote("/api/client/remove", { clientId: String(tabId) });
+  // 轮询注册表清理
+  if (pollRegistry[String(tabId)]) {
+    delete pollRegistry[String(tabId)];
+    broadcastPollAdjust();
+  }
 });
+
+// ── 跨标签页轮询协调 ─────────────────────────────────────────────
+
+const pollRegistry = {}; // { tabId: { baseInterval, registeredAt } }
+
+function broadcastPollAdjust() {
+  const tabIds = Object.keys(pollRegistry);
+  const count = tabIds.length;
+  if (count === 0) return;
+  for (const tabId of tabIds) {
+    const entry = pollRegistry[tabId];
+    const adjusted = entry.baseInterval * count;
+    chrome.tabs.sendMessage(parseInt(tabId), {
+      type: "POLL_ADJUST",
+      interval: adjusted,
+      tabCount: count,
+    }).catch(() => {
+      delete pollRegistry[tabId];
+    });
+  }
+}
 
 // ── 动态注册自定义域名的内容脚本 ─────────────────────────────────
 
@@ -369,6 +395,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         chrome.scripting.executeScript({ target: { tabId: msg.tabId }, files: ["content_script.js"] }).catch(() => {});
         chrome.scripting.insertCSS({ target: { tabId: msg.tabId }, files: ["styles.css"] }).catch(() => {});
       });
+    }
+  }
+
+  if (msg.type === "POLL_REGISTER") {
+    const tabId = sender?.tab?.id;
+    if (tabId) {
+      pollRegistry[String(tabId)] = {
+        baseInterval: msg.interval || 600,
+        registeredAt: Date.now(),
+      };
+      broadcastPollAdjust();
+    }
+  }
+
+  if (msg.type === "POLL_UNREGISTER") {
+    const tabId = sender?.tab?.id;
+    if (tabId && pollRegistry[String(tabId)]) {
+      delete pollRegistry[String(tabId)];
+      broadcastPollAdjust();
     }
   }
 
