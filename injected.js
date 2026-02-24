@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   Slot Sentinel – Network Interceptor
+   AutoSlot – Network Interceptor
    运行在 MAIN world，拦截 fetch/XHR
    在 API 响应阶段（DOM 渲染前）检测 slot 可用性
    支持 capacity API 高频轮询

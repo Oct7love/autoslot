@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   Slot Sentinel – Popup Script (v2.1 FBN)
+   AutoSlot – Popup Script
    支持定时调度管理
    ───────────────────────────────────────────── */
 
@@ -507,7 +507,7 @@ function updateArmUI(armed) {
 
 armBtn.addEventListener("click", () => {
   chrome.storage.local.get(["armed", "scheduleEnabled"], ({ armed, scheduleEnabled }) => {
-    const next = !(armed !== false);
+    const next = !armed;
     const updates = { armed: next };
     // 手动切换时，如果调度开着，设置覆盖标记防止调度反复切换
     if (scheduleEnabled) updates.manualOverride = true;
@@ -657,7 +657,7 @@ btnClearLogs.addEventListener("click", () => {
 btnLogFilter.addEventListener("click", () => {
   logFilterTab = !logFilterTab;
   btnLogFilter.textContent = logFilterTab ? "仅当前" : "全部";
-  btnLogFilter.classList.toggle("show-all", !logFilterTab);
+  btnLogFilter.style.color = logFilterTab ? "" : "var(--text-secondary)";
   chrome.storage.local.get("logs", ({ logs = [] }) => renderLogs(logs));
 });
 
@@ -795,7 +795,7 @@ if (btnTestRemote) {
     fetch(url.replace(/\/+$/, "") + "/api/log", {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + tk },
-      body: JSON.stringify({ ts: Date.now(), level: "info", message: "连接测试 — 来自 Slot Sentinel 插件" }),
+      body: JSON.stringify({ ts: Date.now(), level: "info", message: "连接测试 — 来自 AutoSlot 插件" }),
     })
       .then((r) => showRemoteStatus(r.ok ? "ok" : "err", r.ok ? "连接成功" : "失败: " + r.status))
       .catch((e) => showRemoteStatus("err", "连接失败: " + e.message));

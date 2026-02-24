@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   Slot Sentinel – Content Script
+   AutoSlot – Content Script
    Noon FBN 仓库 slot 专用自动抢位
    支持：自动检测、自动点击、自动刷新
    ───────────────────────────────────────────── */
@@ -957,21 +957,7 @@
     if (document.getElementById("ss-safety-banner")) return;
     const banner = document.createElement("div");
     banner.id = "ss-safety-banner";
-    banner.innerHTML = "⚠️ Slot Sentinel 已暂停 — 检测到反爬信号，请手动重新启用";
-    Object.assign(banner.style, {
-      position: "fixed",
-      top: "0",
-      left: "0",
-      right: "0",
-      zIndex: "2147483647",
-      background: "#d32f2f",
-      color: "#fff",
-      padding: "12px 16px",
-      fontSize: "14px",
-      fontWeight: "600",
-      textAlign: "center",
-      fontFamily: "system-ui, sans-serif",
-    });
+    banner.textContent = "⚠️ AutoSlot 已暂停 — 检测到反爬信号，请手动重新启用";
     document.body.appendChild(banner);
     setTimeout(() => banner?.remove(), 20000);
   }
@@ -1072,84 +1058,6 @@
             .join(" ")
         : document.body?.innerText || "";
     return SOLD_OUT_PATTERNS.some((p) => p.test(searchIn));
-  }
-
-  // ── 可用按钮检测（多策略扫描）────────────────────────────────────
-
-  function detectAvailableButtons() {
-    const selectors = [
-      'button:not([disabled]):not([aria-disabled="true"])',
-      'a[role="button"]:not([aria-disabled="true"])',
-      '[role="button"]:not([aria-disabled="true"])',
-      'input[type="submit"]:not([disabled])',
-      'div[role="button"]:not([aria-disabled="true"])',
-      'span[role="button"]:not([aria-disabled="true"])',
-      '[class*="btn"]:not([disabled])',
-      '[class*="button"]:not([disabled])',
-      '[data-testid*="book"]:not([disabled])',
-      '[data-testid*="select"]:not([disabled])',
-      '[data-testid*="slot"]:not([disabled])',
-      '[data-testid*="confirm"]:not([disabled])',
-    ];
-    const all = document.querySelectorAll(selectors.join(","));
-    const scored = [];
-
-    for (const el of all) {
-      if (el.closest("#ss-toast, #ss-slot-label, #ss-safety-banner, #ss-autoclick-overlay")) continue;
-
-      const text = (el.textContent || el.value || "").trim().toLowerCase();
-      const ariaLabel = (el.getAttribute("aria-label") || "").toLowerCase();
-      const title = (el.getAttribute("title") || "").toLowerCase();
-      const dataTestId = (el.getAttribute("data-testid") || "").toLowerCase();
-      const combined = [text, ariaLabel, title, dataTestId].join(" ");
-
-      const kwMatch = LABEL_KEYWORDS.findIndex((kw) => combined.includes(kw));
-      if (kwMatch === -1) continue;
-
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      const visible =
-        rect.width > 0 &&
-        rect.height > 0 &&
-        style.visibility !== "hidden" &&
-        style.display !== "none" &&
-        style.opacity !== "0";
-      if (!visible) continue;
-
-      const inViewport =
-        rect.top >= 0 &&
-        rect.left >= 0 &&
-        rect.bottom <= window.innerHeight &&
-        rect.right <= window.innerWidth;
-
-      const nearSlotContainer = !!el.closest(SLOT_CONTAINER_SELECTORS);
-
-      const area = rect.width * rect.height;
-
-      const isDirectAction = /^(book|select|reserve|schedule|confirm)\b/i.test(text.trim());
-
-      let timeMatchBonus = 0;
-      const preferredTime = (cfg.preferredTimeText || "").trim();
-      if (preferredTime && isTimeInRange(combined, preferredTime)) {
-        timeMatchBonus = 200;
-      }
-
-      scored.push({
-        el,
-        score:
-          (inViewport ? 100 : 0) +
-          (10 - kwMatch) * 10 +
-          (nearSlotContainer ? 50 : 0) +
-          Math.min(area / 100, 30) +
-          (isDirectAction ? 80 : 0) +
-          timeMatchBonus,
-        text: text.slice(0, 60),
-        selector: describeSelector(el),
-      });
-    }
-
-    scored.sort((a, b) => b.score - a.score);
-    return scored;
   }
 
   function describeSelector(el) {

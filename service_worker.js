@@ -1,5 +1,5 @@
 /* ─────────────────────────────────────────────
-   Slot Sentinel – Service Worker (MV3)
+   AutoSlot – Service Worker (MV3)
    v2.3: 支持自定义网址、定时调度、自动点击、自动刷新
    ───────────────────────────────────────────── */
 
@@ -463,13 +463,13 @@ async function sendEmail(event, details) {
   const subjects = {
     available: "⚡ Noon FBN 仓库有位了!",
     clicked: "✅ Noon FBN 仓库已自动抢位!",
-    test: "🔔 Slot Sentinel 邮件测试",
+    test: "🔔 AutoSlot 邮件测试",
   };
 
   const bodies = {
     available: `检测到 ${details.count || "?"} 个可用 slot!\n\n时间: ${timeStr}\n按钮: ${details.buttons || "N/A"}\n页面: ${details.url || "N/A"}\n\n${cfg.autoClick ? "自动点击已启用，正在抢位…" : "请尽快手动预约!"}`,
     clicked: `已成功自动点击预约按钮!\n\n时间: ${timeStr}\n点击按钮: ${details.buttonText || "N/A"}\n页面: ${details.url || "N/A"}\n\n请确认预约是否成功完成。`,
-    test: `这是一封测试邮件，确认 Slot Sentinel 邮件通知功能正常。\n\n时间: ${timeStr}\n配置状态: 正常`,
+    test: `这是一封测试邮件，确认 AutoSlot 邮件通知功能正常。\n\n时间: ${timeStr}\n配置状态: 正常`,
   };
 
   const payload = {
@@ -478,7 +478,7 @@ async function sendEmail(event, details) {
     user_id: cfg.emailPublicKey,
     template_params: {
       to_email: cfg.emailAddress,
-      subject: subjects[event] || "Slot Sentinel 通知",
+      subject: subjects[event] || "AutoSlot 通知",
       message: bodies[event] || details.message || "",
       time: timeStr,
       event_type: event,
